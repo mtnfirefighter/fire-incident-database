@@ -66,21 +66,22 @@ def render_dynamic_form(df: pd.DataFrame, lookups: Dict[str, List[str]], default
     for i, col in enumerate(columns):
         with cols3[i % 3]:
             current = defaults.get(col, None)
+            key = f"incident_field_{col}"
             if col in lookups:
                 options = lookups[col]
                 idx = options.index(current) if isinstance(current, str) and current in options else None
-                vals[col] = st.selectbox(col, options=options, index=idx, placeholder=f"Select {col}...")
+                vals[col] = st.selectbox(col, options=options, index=idx, placeholder=f"Select {col}...", key=key)
             elif col in DATE_LIKE:
                 d = pd.to_datetime(current).date() if pd.notna(current) else date.today()
-                vals[col] = st.date_input(col, value=d)
+                vals[col] = st.date_input(col, value=d, key=key)
             elif col in TIME_LIKE:
-                vals[col] = st.text_input(col, value=str(current) if pd.notna(current) else "", placeholder="HH:MM")
+                vals[col] = st.text_input(col, value=str(current) if pd.notna(current) else "", placeholder="HH:MM", key=key)
             else:
                 if col in df.select_dtypes(include="number").columns:
                     base = float(current) if pd.notna(current) else 0.0
-                    vals[col] = st.number_input(col, value=base)
+                    vals[col] = st.number_input(col, value=base, key=key)
                 else:
-                    vals[col] = st.text_input(col, value=str(current) if pd.notna(current) else "")
+                    vals[col] = st.text_input(col, value=str(current) if pd.notna(current) else "", key=key)
     return vals
 
 def upsert_row(df: pd.DataFrame, row: dict, key=PRIMARY_KEY) -> pd.DataFrame:
@@ -101,7 +102,6 @@ def upsert_row(df: pd.DataFrame, row: dict, key=PRIMARY_KEY) -> pd.DataFrame:
     return df
 
 def add_master_row(df: pd.DataFrame, row: dict) -> pd.DataFrame:
-    # Simple append; no PK constraints for master lists here
     for k in row.keys():
         if k not in df.columns:
             df[k] = pd.NA
@@ -117,16 +117,15 @@ def related_editor(table_name: str, data: Dict[str, pd.DataFrame], lookups: Dict
     view = df[df[PRIMARY_KEY].astype(str) == str(incident_number)].copy()
     st.dataframe(view, use_container_width=True, hide_index=True)
 
-    # Bulk add helpers for Personnel & Apparatus
     if table_name == "Incident_Personnel":
         roles = lookups.get("Role", ["OIC","Driver","Firefighter"])
         master_people = data.get("Personnel", pd.DataFrame())
         name_options = master_people["Name"].dropna().astype(str).tolist() if "Name" in master_people.columns else []
         with st.expander("Bulk add personnel"):
-            picked = st.multiselect("Select personnel", options=name_options)
-            default_role = st.selectbox("Role for selected", options=roles, index=0 if roles else None)
-            default_hours = st.number_input("Hours (each)", value=0.0, min_value=0.0, step=0.5)
-            if st.button("Add selected personnel"):
+            picked = st.multiselect("Select personnel", options=name_options, key="bulk_personnel_pick")
+            default_role = st.selectbox("Role for selected", options=roles, index=0 if roles else None, key="bulk_personnel_role")
+            default_hours = st.number_input("Hours (each)", value=0.0, min_value=0.0, step=0.5, key="bulk_personnel_hours")
+            if st.button("Add selected personnel", key="btn_bulk_personnel_add"):
                 rows = []
                 for nm in picked:
                     rows.append({PRIMARY_KEY: incident_number, "Name": nm, "Role": default_role, "Hours": default_hours})
@@ -136,16 +135,15 @@ def related_editor(table_name: str, data: Dict[str, pd.DataFrame], lookups: Dict
     elif table_name == "Incident_Apparatus":
         roles = ["Primary","Support","Water Supply","Staging"]
         master_units = data.get("Apparatus", pd.DataFrame())
-        # Prefer CallSign; fallback to generic Unit
         label_col = "CallSign" if "CallSign" in master_units.columns else "Unit"
         unit_opts = master_units[label_col].dropna().astype(str).tolist() if label_col in master_units.columns else []
         actions_opts = lookups.get("Action", [])
         with st.expander("Bulk add apparatus"):
-            picked_units = st.multiselect("Select apparatus", options=unit_opts)
-            default_role = st.selectbox("Role for selected units", options=roles, index=0 if roles else None)
-            picked_actions = st.multiselect("Actions (optional)", options=actions_opts)
-            default_unit_type = st.selectbox("UnitType (optional)", options=lookups.get("UnitType", []), index=None, placeholder="Select...")
-            if st.button("Add selected apparatus"):
+            picked_units = st.multiselect("Select apparatus", options=unit_opts, key="bulk_units_pick")
+            default_role = st.selectbox("Role for selected units", options=roles, index=0 if roles else None, key="bulk_units_role")
+            picked_actions = st.multiselect("Actions (optional)", options=actions_opts, key="bulk_units_actions")
+            default_unit_type = st.selectbox("UnitType (optional)", options=lookups.get("UnitType", []), index=None, placeholder="Select...", key="bulk_units_unittype")
+            if st.button("Add selected apparatus", key="btn_bulk_units_add"):
                 rows = []
                 for u in picked_units:
                     rows.append({
@@ -165,14 +163,15 @@ def related_editor(table_name: str, data: Dict[str, pd.DataFrame], lookups: Dict
             cols2 = st.columns(3)
             for i, c in enumerate(cols):
                 with cols2[i % 3]:
+                    key = f"add_{table_name}_{c}"
                     if c in lookups:
                         opts = lookups[c]
-                        add_vals[c] = st.selectbox(c, options=opts, index=None, placeholder=f"Select {c}...")
+                        add_vals[c] = st.selectbox(c, options=opts, index=None, placeholder=f"Select {c}...", key=key)
                     elif c in TIME_LIKE:
-                        add_vals[c] = st.text_input(c, placeholder="HH:MM")
+                        add_vals[c] = st.text_input(c, placeholder="HH:MM", key=key)
                     else:
-                        add_vals[c] = st.text_input(c)
-            if st.button(f"Add row to {table_name}"):
+                        add_vals[c] = st.text_input(c, key=key)
+            if st.button(f"Add row to {table_name}", key=f"btn_add_{table_name}"):
                 new_row = {PRIMARY_KEY: incident_number}
                 new_row.update(add_vals)
                 data[table_name] = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
@@ -246,8 +245,8 @@ def printable_incident(data: Dict[str, pd.DataFrame], incident_number: str):
 
 # ---------- App ----------
 st.sidebar.title("🚒 Fire Incident DB")
-file_path = st.sidebar.text_input("Excel path", value=DEFAULT_FILE)
-uploaded = st.sidebar.file_uploader("Upload/replace workbook (.xlsx)", type=["xlsx"])
+file_path = st.sidebar.text_input("Excel path", value=DEFAULT_FILE, key="sidebar_path")
+uploaded = st.sidebar.file_uploader("Upload/replace workbook (.xlsx)", type=["xlsx"], key="sidebar_upload")
 if uploaded:
     with open(file_path, "wb") as f:
         f.write(uploaded.read())
@@ -261,13 +260,11 @@ if not data:
     st.info("Upload or point to your Excel workbook to begin.")
     st.stop()
 
-# Ensure core sheets exist
 if "Incidents" not in data:
     data["Incidents"] = pd.DataFrame(columns=[PRIMARY_KEY])
 for t, cols in CHILD_TABLES.items():
     if t not in data:
         data[t] = pd.DataFrame(columns=cols)
-# Ensure master sheets exist
 if "Personnel" not in data:
     data["Personnel"] = pd.DataFrame(columns=["Name","Badge","Role","Certifications","Active"])
 if "Apparatus" not in data:
@@ -282,19 +279,19 @@ with tab1:
     base = data["Incidents"].copy()
     fc1, fc2, fc3, fc4 = st.columns(4)
     with fc1:
-        val_type = st.selectbox("IncidentType", options=[""]+lookups.get("IncidentType", []))
+        val_type = st.selectbox("IncidentType", options=[""]+lookups.get("IncidentType", []), key="filter_type")
         if val_type:
             base = base[base.get("IncidentType","").astype(str) == val_type]
     with fc2:
-        val_prio = st.selectbox("ResponsePriority", options=[""]+lookups.get("ResponsePriority", []))
+        val_prio = st.selectbox("ResponsePriority", options=[""]+lookups.get("ResponsePriority", []), key="filter_prio")
         if val_prio:
             base = base[base.get("ResponsePriority","").astype(str) == val_prio]
     with fc3:
-        city = st.text_input("City contains")
+        city = st.text_input("City contains", key="filter_city")
         if city:
             base = base[base.get("City","").astype(str).str.contains(city, case=False, na=False)]
     with fc4:
-        dr = st.date_input("Date range", [])
+        dr = st.date_input("Date range", [], key="filter_dates")
         if isinstance(dr, list) and len(dr) == 2:
             start, end = pd.to_datetime(dr[0]), pd.to_datetime(dr[1])
             base = base[(pd.to_datetime(base.get("IncidentDate", pd.NaT), errors="coerce") >= start) &
@@ -304,18 +301,17 @@ with tab1:
 with tab2:
     st.header("Add / Edit Incident")
     master = data["Incidents"]
-    mode = st.radio("Mode", ["Add","Edit"], horizontal=True)
+    mode = st.radio("Mode", ["Add","Edit"], horizontal=True, key="mode_incident")
     defaults = {}
     if mode == "Edit" and not master.empty and PRIMARY_KEY in master.columns:
         options = master[PRIMARY_KEY].dropna().astype(str).tolist()
-        selected = st.selectbox("Select IncidentNumber", options=options, index=None, placeholder="Choose...")
+        selected = st.selectbox("Select IncidentNumber", options=options, index=None, placeholder="Choose...", key="pick_incident_edit")
         if selected:
             defaults = master[master[PRIMARY_KEY].astype(str) == selected].iloc[0].to_dict()
-
     vals = render_dynamic_form(master, lookups, defaults)
     if "IncidentDate" in vals:
         vals["IncidentDate"] = pd.to_datetime(vals["IncidentDate"])
-    if st.button("Save Incident"):
+    if st.button("Save Incident", key="btn_save_incident"):
         data["Incidents"] = upsert_row(master, vals, key=PRIMARY_KEY)
         st.success("Saved.")
 
@@ -324,7 +320,7 @@ with tab3:
     if data["Incidents"].empty:
         st.info("Add an incident first.")
     else:
-        inc_id = st.selectbox("IncidentNumber", options=data["Incidents"][PRIMARY_KEY].dropna().astype(str).tolist(), index=None)
+        inc_id = st.selectbox("IncidentNumber", options=data["Incidents"][PRIMARY_KEY].dropna().astype(str).tolist(), index=None, key="pick_incident_related")
         if inc_id:
             for t in ["Incident_Times","Incident_Personnel","Incident_Apparatus","Incident_Actions"]:
                 related_editor(t, data, lookups, inc_id)
@@ -339,14 +335,13 @@ with tab4:
         st.subheader("Personnel Master")
         st.dataframe(data["Personnel"], use_container_width=True, hide_index=True)
         with st.expander("Add personnel"):
-            p_cols = ["Name","Badge","Role","Certifications","Active"]
             c = st.columns(5)
-            name = c[0].text_input("Name")
-            badge = c[1].text_input("Badge")
-            role = c[2].selectbox("Role", options=lookups.get("Role", ["OIC","Driver","Firefighter"]), index=0)
-            certs = c[3].text_input("Certifications")
-            active = c[4].selectbox("Active", options=["Yes","No"], index=0)
-            if st.button("Add to Personnel"):
+            name = c[0].text_input("Name", key="person_name")
+            badge = c[1].text_input("Badge", key="person_badge")
+            role = c[2].selectbox("Role", options=lookups.get("Role", ["OIC","Driver","Firefighter"]), index=0, key="person_role")
+            certs = c[3].text_input("Certifications", key="person_certs")
+            active = c[4].selectbox("Active", options=["Yes","No"], index=0, key="person_active")
+            if st.button("Add to Personnel", key="btn_add_personnel"):
                 row = {"Name": name, "Badge": badge, "Role": role, "Certifications": certs, "Active": active}
                 data["Personnel"] = add_master_row(data["Personnel"], row)
                 st.success("Added personnel.")
@@ -354,16 +349,15 @@ with tab4:
         st.subheader("Apparatus Master")
         st.dataframe(data["Apparatus"], use_container_width=True, hide_index=True)
         with st.expander("Add apparatus"):
-            a_cols = ["ApparatusID","CallSign","UnitType","SeatingCapacity","Station","Active"]
             c = st.columns(6)
-            app_id = c[0].text_input("ApparatusID")
-            callsign = c[1].text_input("CallSign")
-            unit_type = c[2].selectbox("UnitType", options=lookups.get("UnitType", []), index=None, placeholder="Select...")
-            seats = c[3].number_input("SeatingCapacity", value=0, step=1, min_value=0)
-            station = c[4].text_input("Station")
-            active = c[5].selectbox("Active", options=["Yes","No"], index=0)
-            if st.button("Add to Apparatus"):
-                row = {"ApparatusID": app_id, "CallSign": callsign, "UnitType": unit_type, "SeatingCapacity": seats, "Station": station, "Active": active}
+            app_id = c[0].text_input("ApparatusID", key="app_id")
+            callsign = c[1].text_input("CallSign", key="app_callsign")
+            unit_type = c[2].selectbox("UnitType", options=lookups.get("UnitType", []), index=None, placeholder="Select...", key="app_unittype")
+            seats = c[3].number_input("SeatingCapacity", value=0, step=1, min_value=0, key="app_seats")
+            station = c[4].text_input("Station", key="app_station")
+            active2 = c[5].selectbox("Active", options=["Yes","No"], index=0, key="app_active")
+            if st.button("Add to Apparatus", key="btn_add_apparatus"):
+                row = {"ApparatusID": app_id, "CallSign": callsign, "UnitType": unit_type, "SeatingCapacity": seats, "Station": station, "Active": active2}
                 data["Apparatus"] = add_master_row(data["Apparatus"], row)
                 st.success("Added apparatus.")
 
@@ -372,10 +366,10 @@ with tab5:
 
 with tab6:
     st.header("Export")
-    if st.button("Build Excel for Download"):
+    if st.button("Build Excel for Download", key="btn_build_export"):
         payload = save_workbook_to_bytes(data)
-        st.download_button("Download Excel", data=payload, file_name="fire_incident_db_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    if st.button("Overwrite Source File"):
+        st.download_button("Download Excel", data=payload, file_name="fire_incident_db_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_export")
+    if st.button("Overwrite Source File", key="btn_overwrite_source"):
         payload = save_workbook_to_bytes(data)
         with open(file_path, "wb") as f:
             f.write(payload)
