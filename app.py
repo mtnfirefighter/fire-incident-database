@@ -7,7 +7,8 @@ from datetime import datetime
 st.set_page_config(page_title="Fire Incident DB", page_icon="🚒", layout="wide")
 
 # --- Settings ---
-FILE_PATH = "fire_incident_db.xlsx"  # default name; change if needed
+import os
+FILE_PATH = os.path.join(os.path.dirname(__file__), "fire_incident_db.xlsx")
 LOOKUP_PREFIX = "List_"
 
 # --- Helpers ---
