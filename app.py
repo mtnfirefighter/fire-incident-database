@@ -215,6 +215,31 @@ def analytics_reports(data: Dict[str, pd.DataFrame]):
         tmp["resp_min"] = tmp.apply(lambda r: r["t_arrival"]-r["t_alarm"] if r["t_alarm"] is not None and r["t_arrival"] is not None else None, axis=1)
         st.dataframe(tmp[[PRIMARY_KEY,"Alarm","Arrival","resp_min"]], use_container_width=True, hide_index=True)
 
+def incident_snapshot(data: Dict[str, pd.DataFrame], incident_number: str):
+    """Small summary box used in Add/Edit when editing an incident."""
+    per = data.get("Incident_Personnel", pd.DataFrame())
+    app = data.get("Incident_Apparatus", pd.DataFrame())
+    per_view = per[per[PRIMARY_KEY].astype(str) == str(incident_number)] if not per.empty and PRIMARY_KEY in per.columns else pd.DataFrame()
+    app_view = app[app[PRIMARY_KEY].astype(str) == str(incident_number)] if not app.empty and PRIMARY_KEY in app.columns else pd.DataFrame()
+
+    total_personnel = len(per_view) if not per_view.empty else 0
+    total_apparatus = len(app_view["Unit"].dropna()) if not app_view.empty and "Unit" in app_view.columns else 0
+
+    st.subheader("Incident Snapshot")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write(f"**Personnel on Scene:** {total_personnel}")
+        if not per_view.empty:
+            by_role = per_view["Role"].fillna("Unspecified").value_counts().rename_axis("Role").reset_index(name="Count")
+            st.dataframe(by_role, use_container_width=True, hide_index=True)
+            roster = per_view.apply(lambda r: f"{r.get('Name','')} ({r.get('Role','')})", axis=1).tolist()
+            st.write("**Roster:** " + ", ".join([x for x in roster if x and str(x).strip() != "()"]))
+    with c2:
+        st.write(f"**Apparatus on Scene:** {total_apparatus}")
+        if not app_view.empty:
+            units = app_view["Unit"].dropna().astype(str).tolist() if "Unit" in app_view.columns else []
+            st.write("**Units:** " + ", ".join(units))
+
 def printable_incident(data: Dict[str, pd.DataFrame], incident_number: str):
     st.header(f"Incident Report — #{incident_number}")
     inc = data.get("Incidents", pd.DataFrame())
@@ -223,6 +248,8 @@ def printable_incident(data: Dict[str, pd.DataFrame], incident_number: str):
         st.warning("Incident not found.")
         return
     rec = row.iloc[0].to_dict()
+
+    # Header details
     cols = st.columns(2)
     left_keys = ["IncidentDate","IncidentTime","IncidentType","ResponsePriority","AlarmLevel","Shift"]
     right_keys = ["LocationName","Address","City","State","PostalCode"]
@@ -235,6 +262,32 @@ def printable_incident(data: Dict[str, pd.DataFrame], incident_number: str):
             if k in rec:
                 st.write(f"**{k}:** {rec.get(k,'')}")
 
+    # Personnel/Apparatus summary
+    per = data.get("Incident_Personnel", pd.DataFrame())
+    app = data.get("Incident_Apparatus", pd.DataFrame())
+    per_view = per[per[PRIMARY_KEY].astype(str) == str(incident_number)] if not per.empty and PRIMARY_KEY in per.columns else pd.DataFrame()
+    app_view = app[app[PRIMARY_KEY].astype(str) == str(incident_number)] if not app.empty and PRIMARY_KEY in app.columns else pd.DataFrame()
+
+    st.subheader("On-Scene Summary")
+    c1, c2 = st.columns(2)
+    # Personnel
+    with c1:
+        total_personnel = len(per_view) if not per_view.empty else 0
+        st.write(f"**Personnel on Scene:** {total_personnel}")
+        if not per_view.empty:
+            by_role = per_view["Role"].fillna("Unspecified").value_counts().rename_axis("Role").reset_index(name="Count")
+            st.dataframe(by_role, use_container_width=True, hide_index=True)
+            roster = per_view.apply(lambda r: f"{r.get('Name','')} ({r.get('Role','')})", axis=1).tolist()
+            st.write("**Roster:** " + ", ".join([x for x in roster if x and str(x).strip() != "()"]))
+    # Apparatus
+    with c2:
+        total_apparatus = len(app_view["Unit"].dropna()) if not app_view.empty and "Unit" in app_view.columns else 0
+        st.write(f"**Apparatus on Scene:** {total_apparatus}")
+        if not app_view.empty:
+            units = app_view["Unit"].dropna().astype(str).tolist() if "Unit" in app_view.columns else []
+            st.write("**Units:** " + ", ".join(units))
+
+    # Children tables (detail)
     for t in ["Incident_Times","Incident_Personnel","Incident_Apparatus","Incident_Actions"]:
         df = data.get(t, pd.DataFrame())
         if not df.empty and PRIMARY_KEY in df.columns:
@@ -260,11 +313,13 @@ if not data:
     st.info("Upload or point to your Excel workbook to begin.")
     st.stop()
 
+# Ensure core sheets exist
 if "Incidents" not in data:
     data["Incidents"] = pd.DataFrame(columns=[PRIMARY_KEY])
 for t, cols in CHILD_TABLES.items():
     if t not in data:
         data[t] = pd.DataFrame(columns=cols)
+# Ensure master sheets exist
 if "Personnel" not in data:
     data["Personnel"] = pd.DataFrame(columns=["Name","Badge","Role","Certifications","Active"])
 if "Apparatus" not in data:
@@ -303,17 +358,24 @@ with tab2:
     master = data["Incidents"]
     mode = st.radio("Mode", ["Add","Edit"], horizontal=True, key="mode_incident")
     defaults = {}
+    selected = None
     if mode == "Edit" and not master.empty and PRIMARY_KEY in master.columns:
         options = master[PRIMARY_KEY].dropna().astype(str).tolist()
         selected = st.selectbox("Select IncidentNumber", options=options, index=None, placeholder="Choose...", key="pick_incident_edit")
         if selected:
             defaults = master[master[PRIMARY_KEY].astype(str) == selected].iloc[0].to_dict()
+
     vals = render_dynamic_form(master, lookups, defaults)
     if "IncidentDate" in vals:
         vals["IncidentDate"] = pd.to_datetime(vals["IncidentDate"])
     if st.button("Save Incident", key="btn_save_incident"):
         data["Incidents"] = upsert_row(master, vals, key=PRIMARY_KEY)
         st.success("Saved.")
+
+    # Snapshot panel when editing a specific incident
+    if mode == "Edit" and selected:
+        with st.expander("Incident Snapshot (personnel & apparatus)", expanded=True):
+            incident_snapshot(data, selected)
 
 with tab3:
     st.header("Related Records")
@@ -325,7 +387,7 @@ with tab3:
             for t in ["Incident_Times","Incident_Personnel","Incident_Apparatus","Incident_Actions"]:
                 related_editor(t, data, lookups, inc_id)
             st.divider()
-            with st.expander("Printable Incident Report"):
+            with st.expander("Printable Incident Report", expanded=True):
                 printable_incident(data, inc_id)
 
 with tab4:

@@ -1,1 +1,1 @@
-# v3.1 — Unique widget keys added to avoid StreamlitDuplicateElementId
+# v3.2 — Report shows personnel/app counts & rosters; Add/Edit snapshot
