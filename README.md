@@ -1,1 +1,1 @@
-# v3.3 — Dedicated Rosters page (full editable Personnel & Apparatus)
+# v3.4 — Dedicated 'Assign to Incident' tab for Personnel & Apparatus
