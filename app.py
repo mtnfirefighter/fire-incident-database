@@ -11,7 +11,7 @@ st.set_page_config(page_title="Fire Incident DB", page_icon="🚒", layout="wide
 
 # ---------- Settings ----------
 DEFAULT_FILE = os.path.join(os.path.dirname(__file__), "fire_incident_db.xlsx")
-PRIMARY_KEY = "IncidentNumber"  # aligns with your workbook
+PRIMARY_KEY = "IncidentNumber"
 CHILD_TABLES = {
     "Incident_Times": ["IncidentNumber","Alarm","Enroute","Arrival","Clear"],
     "Incident_Personnel": ["IncidentNumber","Name","Role","Hours"],
@@ -27,7 +27,6 @@ LOOKUP_SHEETS = {
     "List_Actions": "Action",
     "List_States": "State",
 }
-
 DATE_LIKE = {"IncidentDate"}
 TIME_LIKE = {"IncidentTime","Alarm","Enroute","Arrival","Clear"}
 
@@ -58,7 +57,6 @@ def get_lookups(data: Dict[str, pd.DataFrame]) -> Dict[str, List[str]]:
     return out
 
 def render_dynamic_form(df: pd.DataFrame, lookups: Dict[str, List[str]], defaults: dict) -> dict:
-    """Render inputs for each column in Incidents based on type/name hints."""
     vals = {}
     prefer_first = [PRIMARY_KEY, "IncidentDate", "IncidentTime", "IncidentType", "ResponsePriority", "AlarmLevel",
                     "Shift","LocationName","Address","City","State","PostalCode",
@@ -96,12 +94,18 @@ def upsert_row(df: pd.DataFrame, row: dict, key=PRIMARY_KEY) -> pd.DataFrame:
                 df[k] = pd.NA
             df.loc[idx, k] = v
     else:
-        # Ensure all columns exist
         for k in row.keys():
             if k not in df.columns:
                 df[k] = pd.NA
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     return df
+
+def add_master_row(df: pd.DataFrame, row: dict) -> pd.DataFrame:
+    # Simple append; no PK constraints for master lists here
+    for k in row.keys():
+        if k not in df.columns:
+            df[k] = pd.NA
+    return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
 
 def related_editor(table_name: str, data: Dict[str, pd.DataFrame], lookups: Dict[str, List[str]], incident_number: str):
     st.subheader(table_name.replace("_", " "))
@@ -112,24 +116,67 @@ def related_editor(table_name: str, data: Dict[str, pd.DataFrame], lookups: Dict
         df[PRIMARY_KEY] = pd.NA
     view = df[df[PRIMARY_KEY].astype(str) == str(incident_number)].copy()
     st.dataframe(view, use_container_width=True, hide_index=True)
-    with st.expander(f"Add to {table_name}"):
-        add_vals = {}
-        cols = [c for c in df.columns if c != PRIMARY_KEY]
-        cols2 = st.columns(3)
-        for i, c in enumerate(cols):
-            with cols2[i % 3]:
-                if c in lookups:
-                    opts = lookups[c]
-                    add_vals[c] = st.selectbox(c, options=opts, index=None, placeholder=f"Select {c}...")
-                elif c in TIME_LIKE:
-                    add_vals[c] = st.text_input(c, placeholder="HH:MM")
-                else:
-                    add_vals[c] = st.text_input(c)
-        if st.button(f"Add row to {table_name}"):
-            new_row = {PRIMARY_KEY: incident_number}
-            new_row.update(add_vals)
-            data[table_name] = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-            st.success("Added.")
+
+    # Bulk add helpers for Personnel & Apparatus
+    if table_name == "Incident_Personnel":
+        roles = lookups.get("Role", ["OIC","Driver","Firefighter"])
+        master_people = data.get("Personnel", pd.DataFrame())
+        name_options = master_people["Name"].dropna().astype(str).tolist() if "Name" in master_people.columns else []
+        with st.expander("Bulk add personnel"):
+            picked = st.multiselect("Select personnel", options=name_options)
+            default_role = st.selectbox("Role for selected", options=roles, index=0 if roles else None)
+            default_hours = st.number_input("Hours (each)", value=0.0, min_value=0.0, step=0.5)
+            if st.button("Add selected personnel"):
+                rows = []
+                for nm in picked:
+                    rows.append({PRIMARY_KEY: incident_number, "Name": nm, "Role": default_role, "Hours": default_hours})
+                if rows:
+                    data[table_name] = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
+                    st.success(f"Added {len(rows)} personnel.")
+    elif table_name == "Incident_Apparatus":
+        roles = ["Primary","Support","Water Supply","Staging"]
+        master_units = data.get("Apparatus", pd.DataFrame())
+        # Prefer CallSign; fallback to generic Unit
+        label_col = "CallSign" if "CallSign" in master_units.columns else "Unit"
+        unit_opts = master_units[label_col].dropna().astype(str).tolist() if label_col in master_units.columns else []
+        actions_opts = lookups.get("Action", [])
+        with st.expander("Bulk add apparatus"):
+            picked_units = st.multiselect("Select apparatus", options=unit_opts)
+            default_role = st.selectbox("Role for selected units", options=roles, index=0 if roles else None)
+            picked_actions = st.multiselect("Actions (optional)", options=actions_opts)
+            default_unit_type = st.selectbox("UnitType (optional)", options=lookups.get("UnitType", []), index=None, placeholder="Select...")
+            if st.button("Add selected apparatus"):
+                rows = []
+                for u in picked_units:
+                    rows.append({
+                        PRIMARY_KEY: incident_number,
+                        "Unit": u,
+                        "UnitType": default_unit_type,
+                        "Role": default_role,
+                        "Actions": "; ".join(picked_actions) if picked_actions else ""
+                    })
+                if rows:
+                    data[table_name] = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
+                    st.success(f"Added {len(rows)} apparatus rows.")
+    else:
+        with st.expander(f"Add to {table_name}"):
+            add_vals = {}
+            cols = [c for c in df.columns if c != PRIMARY_KEY]
+            cols2 = st.columns(3)
+            for i, c in enumerate(cols):
+                with cols2[i % 3]:
+                    if c in lookups:
+                        opts = lookups[c]
+                        add_vals[c] = st.selectbox(c, options=opts, index=None, placeholder=f"Select {c}...")
+                    elif c in TIME_LIKE:
+                        add_vals[c] = st.text_input(c, placeholder="HH:MM")
+                    else:
+                        add_vals[c] = st.text_input(c)
+            if st.button(f"Add row to {table_name}"):
+                new_row = {PRIMARY_KEY: incident_number}
+                new_row.update(add_vals)
+                data[table_name] = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                st.success("Added.")
 
 def analytics_reports(data: Dict[str, pd.DataFrame]):
     st.header("Reports")
@@ -214,15 +261,21 @@ if not data:
     st.info("Upload or point to your Excel workbook to begin.")
     st.stop()
 
+# Ensure core sheets exist
 if "Incidents" not in data:
     data["Incidents"] = pd.DataFrame(columns=[PRIMARY_KEY])
 for t, cols in CHILD_TABLES.items():
     if t not in data:
         data[t] = pd.DataFrame(columns=cols)
+# Ensure master sheets exist
+if "Personnel" not in data:
+    data["Personnel"] = pd.DataFrame(columns=["Name","Badge","Role","Certifications","Active"])
+if "Apparatus" not in data:
+    data["Apparatus"] = pd.DataFrame(columns=["ApparatusID","CallSign","UnitType","SeatingCapacity","Station","Active"])
 
 lookups = get_lookups(data)
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Browse","Add / Edit","Related","Reports","Export"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Browse","Add / Edit","Related","People & Units","Reports","Export"])
 
 with tab1:
     st.header("Browse & Filter Incidents")
@@ -280,9 +333,44 @@ with tab3:
                 printable_incident(data, inc_id)
 
 with tab4:
-    analytics_reports(data)
+    st.header("People & Units")
+    subtab1, subtab2 = st.tabs(["Personnel (Master)","Apparatus (Master)"])
+    with subtab1:
+        st.subheader("Personnel Master")
+        st.dataframe(data["Personnel"], use_container_width=True, hide_index=True)
+        with st.expander("Add personnel"):
+            p_cols = ["Name","Badge","Role","Certifications","Active"]
+            c = st.columns(5)
+            name = c[0].text_input("Name")
+            badge = c[1].text_input("Badge")
+            role = c[2].selectbox("Role", options=lookups.get("Role", ["OIC","Driver","Firefighter"]), index=0)
+            certs = c[3].text_input("Certifications")
+            active = c[4].selectbox("Active", options=["Yes","No"], index=0)
+            if st.button("Add to Personnel"):
+                row = {"Name": name, "Badge": badge, "Role": role, "Certifications": certs, "Active": active}
+                data["Personnel"] = add_master_row(data["Personnel"], row)
+                st.success("Added personnel.")
+    with subtab2:
+        st.subheader("Apparatus Master")
+        st.dataframe(data["Apparatus"], use_container_width=True, hide_index=True)
+        with st.expander("Add apparatus"):
+            a_cols = ["ApparatusID","CallSign","UnitType","SeatingCapacity","Station","Active"]
+            c = st.columns(6)
+            app_id = c[0].text_input("ApparatusID")
+            callsign = c[1].text_input("CallSign")
+            unit_type = c[2].selectbox("UnitType", options=lookups.get("UnitType", []), index=None, placeholder="Select...")
+            seats = c[3].number_input("SeatingCapacity", value=0, step=1, min_value=0)
+            station = c[4].text_input("Station")
+            active = c[5].selectbox("Active", options=["Yes","No"], index=0)
+            if st.button("Add to Apparatus"):
+                row = {"ApparatusID": app_id, "CallSign": callsign, "UnitType": unit_type, "SeatingCapacity": seats, "Station": station, "Active": active}
+                data["Apparatus"] = add_master_row(data["Apparatus"], row)
+                st.success("Added apparatus.")
 
 with tab5:
+    analytics_reports(data)
+
+with tab6:
     st.header("Export")
     if st.button("Build Excel for Download"):
         payload = save_workbook_to_bytes(data)
