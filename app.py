@@ -18,6 +18,10 @@ CHILD_TABLES = {
     "Incident_Apparatus": ["IncidentNumber","Unit","UnitType","Role","Actions"],
     "Incident_Actions": ["IncidentNumber","Action","Notes"],
 }
+# Default/Desired schemas for master rosters
+PERSONNEL_SCHEMA = ["PersonnelID","Name","UnitNumber","Rank","Badge","Phone","Email","Address","City","State","PostalCode","Certifications","Active"]
+APPARATUS_SCHEMA = ["ApparatusID","UnitNumber","CallSign","UnitType","GPM","TankSize","SeatingCapacity","Station","Active"]
+
 LOOKUP_SHEETS = {
     "List_IncidentType": "IncidentType",
     "List_AlarmLevel": "AlarmLevel",
@@ -101,11 +105,26 @@ def upsert_row(df: pd.DataFrame, row: dict, key=PRIMARY_KEY) -> pd.DataFrame:
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     return df
 
-def add_master_row(df: pd.DataFrame, row: dict) -> pd.DataFrame:
-    for k in row.keys():
-        if k not in df.columns:
-            df[k] = pd.NA
-    return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+def ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    for c in cols:
+        if c not in df.columns:
+            df[c] = pd.NA
+    # preserve original order but append missing at end
+    return df[[*(col for col in df.columns if col in cols), *(c for c in cols if c not in df.columns)]]
+
+def roster_editor(title: str, sheet_name: str, schema: List[str], data: Dict[str, pd.DataFrame]):
+    st.subheader(title)
+    df = data.get(sheet_name, pd.DataFrame())
+    df = ensure_columns(df, schema)
+    edited = st.data_editor(df, num_rows="dynamic", use_container_width=True, key=f"editor_{sheet_name}")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button(f"Save {title}", key=f"save_{sheet_name}"):
+            data[sheet_name] = edited
+            st.success(f"{title} saved to workbook in memory. Use Export to write file.")
+    with c2:
+        if st.button(f"Revert Changes", key=f"revert_{sheet_name}"):
+            st.experimental_rerun()
 
 def related_editor(table_name: str, data: Dict[str, pd.DataFrame], lookups: Dict[str, List[str]], incident_number: str):
     st.subheader(table_name.replace("_", " "))
@@ -119,7 +138,7 @@ def related_editor(table_name: str, data: Dict[str, pd.DataFrame], lookups: Dict
 
     if table_name == "Incident_Personnel":
         roles = lookups.get("Role", ["OIC","Driver","Firefighter"])
-        master_people = data.get("Personnel", pd.DataFrame())
+        master_people = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA)
         name_options = master_people["Name"].dropna().astype(str).tolist() if "Name" in master_people.columns else []
         with st.expander("Bulk add personnel"):
             picked = st.multiselect("Select personnel", options=name_options, key="bulk_personnel_pick")
@@ -134,9 +153,10 @@ def related_editor(table_name: str, data: Dict[str, pd.DataFrame], lookups: Dict
                     st.success(f"Added {len(rows)} personnel.")
     elif table_name == "Incident_Apparatus":
         roles = ["Primary","Support","Water Supply","Staging"]
-        master_units = data.get("Apparatus", pd.DataFrame())
-        label_col = "CallSign" if "CallSign" in master_units.columns else "Unit"
-        unit_opts = master_units[label_col].dropna().astype(str).tolist() if label_col in master_units.columns else []
+        master_units = ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA)
+        # prefer UnitNumber then CallSign
+        label_col = "UnitNumber" if "UnitNumber" in master_units.columns else ("CallSign" if "CallSign" in master_units.columns else None)
+        unit_opts = master_units[label_col].dropna().astype(str).tolist() if label_col else []
         actions_opts = lookups.get("Action", [])
         with st.expander("Bulk add apparatus"):
             picked_units = st.multiselect("Select apparatus", options=unit_opts, key="bulk_units_pick")
@@ -216,7 +236,6 @@ def analytics_reports(data: Dict[str, pd.DataFrame]):
         st.dataframe(tmp[[PRIMARY_KEY,"Alarm","Arrival","resp_min"]], use_container_width=True, hide_index=True)
 
 def incident_snapshot(data: Dict[str, pd.DataFrame], incident_number: str):
-    """Small summary box used in Add/Edit when editing an incident."""
     per = data.get("Incident_Personnel", pd.DataFrame())
     app = data.get("Incident_Apparatus", pd.DataFrame())
     per_view = per[per[PRIMARY_KEY].astype(str) == str(incident_number)] if not per.empty and PRIMARY_KEY in per.columns else pd.DataFrame()
@@ -249,7 +268,6 @@ def printable_incident(data: Dict[str, pd.DataFrame], incident_number: str):
         return
     rec = row.iloc[0].to_dict()
 
-    # Header details
     cols = st.columns(2)
     left_keys = ["IncidentDate","IncidentTime","IncidentType","ResponsePriority","AlarmLevel","Shift"]
     right_keys = ["LocationName","Address","City","State","PostalCode"]
@@ -262,7 +280,6 @@ def printable_incident(data: Dict[str, pd.DataFrame], incident_number: str):
             if k in rec:
                 st.write(f"**{k}:** {rec.get(k,'')}")
 
-    # Personnel/Apparatus summary
     per = data.get("Incident_Personnel", pd.DataFrame())
     app = data.get("Incident_Apparatus", pd.DataFrame())
     per_view = per[per[PRIMARY_KEY].astype(str) == str(incident_number)] if not per.empty and PRIMARY_KEY in per.columns else pd.DataFrame()
@@ -270,7 +287,6 @@ def printable_incident(data: Dict[str, pd.DataFrame], incident_number: str):
 
     st.subheader("On-Scene Summary")
     c1, c2 = st.columns(2)
-    # Personnel
     with c1:
         total_personnel = len(per_view) if not per_view.empty else 0
         st.write(f"**Personnel on Scene:** {total_personnel}")
@@ -279,7 +295,6 @@ def printable_incident(data: Dict[str, pd.DataFrame], incident_number: str):
             st.dataframe(by_role, use_container_width=True, hide_index=True)
             roster = per_view.apply(lambda r: f"{r.get('Name','')} ({r.get('Role','')})", axis=1).tolist()
             st.write("**Roster:** " + ", ".join([x for x in roster if x and str(x).strip() != "()"]))
-    # Apparatus
     with c2:
         total_apparatus = len(app_view["Unit"].dropna()) if not app_view.empty and "Unit" in app_view.columns else 0
         st.write(f"**Apparatus on Scene:** {total_apparatus}")
@@ -287,7 +302,6 @@ def printable_incident(data: Dict[str, pd.DataFrame], incident_number: str):
             units = app_view["Unit"].dropna().astype(str).tolist() if "Unit" in app_view.columns else []
             st.write("**Units:** " + ", ".join(units))
 
-    # Children tables (detail)
     for t in ["Incident_Times","Incident_Personnel","Incident_Apparatus","Incident_Actions"]:
         df = data.get(t, pd.DataFrame())
         if not df.empty and PRIMARY_KEY in df.columns:
@@ -319,15 +333,20 @@ if "Incidents" not in data:
 for t, cols in CHILD_TABLES.items():
     if t not in data:
         data[t] = pd.DataFrame(columns=cols)
-# Ensure master sheets exist
+
+# Ensure master sheets exist with full schemas
 if "Personnel" not in data:
-    data["Personnel"] = pd.DataFrame(columns=["Name","Badge","Role","Certifications","Active"])
+    data["Personnel"] = pd.DataFrame(columns=PERSONNEL_SCHEMA)
+else:
+    data["Personnel"] = ensure_columns(data["Personnel"], PERSONNEL_SCHEMA)
 if "Apparatus" not in data:
-    data["Apparatus"] = pd.DataFrame(columns=["ApparatusID","CallSign","UnitType","SeatingCapacity","Station","Active"])
+    data["Apparatus"] = pd.DataFrame(columns=APPARATUS_SCHEMA)
+else:
+    data["Apparatus"] = ensure_columns(data["Apparatus"], APPARATUS_SCHEMA)
 
 lookups = get_lookups(data)
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Browse","Add / Edit","Related","People & Units","Reports","Export"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Browse","Add / Edit","Related","Rosters","Reports","Export","About"])
 
 with tab1:
     st.header("Browse & Filter Incidents")
@@ -372,7 +391,6 @@ with tab2:
         data["Incidents"] = upsert_row(master, vals, key=PRIMARY_KEY)
         st.success("Saved.")
 
-    # Snapshot panel when editing a specific incident
     if mode == "Edit" and selected:
         with st.expander("Incident Snapshot (personnel & apparatus)", expanded=True):
             incident_snapshot(data, selected)
@@ -391,37 +409,12 @@ with tab3:
                 printable_incident(data, inc_id)
 
 with tab4:
-    st.header("People & Units")
-    subtab1, subtab2 = st.tabs(["Personnel (Master)","Apparatus (Master)"])
+    st.header("Rosters (Master Lists)")
+    subtab1, subtab2 = st.tabs(["Personnel Roster","Apparatus Roster"])
     with subtab1:
-        st.subheader("Personnel Master")
-        st.dataframe(data["Personnel"], use_container_width=True, hide_index=True)
-        with st.expander("Add personnel"):
-            c = st.columns(5)
-            name = c[0].text_input("Name", key="person_name")
-            badge = c[1].text_input("Badge", key="person_badge")
-            role = c[2].selectbox("Role", options=lookups.get("Role", ["OIC","Driver","Firefighter"]), index=0, key="person_role")
-            certs = c[3].text_input("Certifications", key="person_certs")
-            active = c[4].selectbox("Active", options=["Yes","No"], index=0, key="person_active")
-            if st.button("Add to Personnel", key="btn_add_personnel"):
-                row = {"Name": name, "Badge": badge, "Role": role, "Certifications": certs, "Active": active}
-                data["Personnel"] = add_master_row(data["Personnel"], row)
-                st.success("Added personnel.")
+        roster_editor("Personnel Roster", "Personnel", PERSONNEL_SCHEMA, data)
     with subtab2:
-        st.subheader("Apparatus Master")
-        st.dataframe(data["Apparatus"], use_container_width=True, hide_index=True)
-        with st.expander("Add apparatus"):
-            c = st.columns(6)
-            app_id = c[0].text_input("ApparatusID", key="app_id")
-            callsign = c[1].text_input("CallSign", key="app_callsign")
-            unit_type = c[2].selectbox("UnitType", options=lookups.get("UnitType", []), index=None, placeholder="Select...", key="app_unittype")
-            seats = c[3].number_input("SeatingCapacity", value=0, step=1, min_value=0, key="app_seats")
-            station = c[4].text_input("Station", key="app_station")
-            active2 = c[5].selectbox("Active", options=["Yes","No"], index=0, key="app_active")
-            if st.button("Add to Apparatus", key="btn_add_apparatus"):
-                row = {"ApparatusID": app_id, "CallSign": callsign, "UnitType": unit_type, "SeatingCapacity": seats, "Station": station, "Active": active2}
-                data["Apparatus"] = add_master_row(data["Apparatus"], row)
-                st.success("Added apparatus.")
+        roster_editor("Apparatus Roster", "Apparatus", APPARATUS_SCHEMA, data)
 
 with tab5:
     analytics_reports(data)
@@ -436,3 +429,6 @@ with tab6:
         with open(file_path, "wb") as f:
             f.write(payload)
         st.success(f"Overwrote: {file_path}")
+
+with tab7:
+    st.markdown("**About this app** — v3.3 adds a dedicated, fully-editable `Rosters` page for Personnel and Apparatus. Incident assignment pickers read from these master lists.")

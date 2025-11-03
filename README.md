@@ -1,1 +1,1 @@
-# v3.2 — Report shows personnel/app counts & rosters; Add/Edit snapshot
+# v3.3 — Dedicated Rosters page (full editable Personnel & Apparatus)
