@@ -7,17 +7,21 @@ import streamlit as st
 
 st.set_page_config(page_title="Fire Incident Reports", page_icon="📝", layout="wide")
 
+# ---------------- Config ----------------
 DEFAULT_FILE = os.path.join(os.path.dirname(__file__), "fire_incident_db.xlsx")
 PRIMARY_KEY = "IncidentNumber"
+
 CHILD_TABLES = {
     "Incident_Times": ["IncidentNumber","Alarm","Enroute","Arrival","Clear"],
     "Incident_Personnel": ["IncidentNumber","Name","Role","Hours"],
     "Incident_Apparatus": ["IncidentNumber","Unit","UnitType","Role","Actions"],
     "Incident_Actions": ["IncidentNumber","Action","Notes"],
 }
+
 PERSONNEL_SCHEMA = ["PersonnelID","Name","UnitNumber","Rank","Badge","Phone","Email","Address","City","State","PostalCode","Certifications","Active","FirstName","LastName","FullName"]
 APPARATUS_SCHEMA = ["ApparatusID","UnitNumber","CallSign","UnitType","GPM","TankSize","SeatingCapacity","Station","Active","Name"]
-USERS_SCHEMA = ["Username","Password","Role","FullName","Active"]
+USERS_SCHEMA = ["Username","Password","Role","FullName","Active",
+                "CanWrite","CanEditOwn","CanEditAll","CanReview","CanApprove","CanManageUsers","CanEditRosters","CanPrint"]
 
 LOOKUP_SHEETS = {
     "List_IncidentType": "IncidentType",
@@ -29,13 +33,19 @@ LOOKUP_SHEETS = {
     "List_States": "State",
 }
 
+ROLE_PRESETS = {
+    "Admin":   {"CanWrite":True,"CanEditOwn":True,"CanEditAll":True,"CanReview":True,"CanApprove":True,"CanManageUsers":True,"CanEditRosters":True,"CanPrint":True},
+    "Reviewer":{"CanWrite":False,"CanEditOwn":False,"CanEditAll":False,"CanReview":True,"CanApprove":True,"CanManageUsers":False,"CanEditRosters":False,"CanPrint":True},
+    "Member":  {"CanWrite":True,"CanEditOwn":True,"CanEditAll":False,"CanReview":False,"CanApprove":False,"CanManageUsers":False,"CanEditRosters":False,"CanPrint":True},
+}
+
 # ---------------- Utils ----------------
 def load_workbook(path: str) -> Dict[str, pd.DataFrame]:
     try:
         xls = pd.ExcelFile(path)
         return {name.strip(): xls.parse(name) for name in xls.sheet_names}
     except Exception as e:
-        st.error(f"Failed to load: {e}")
+        st.error(f"Failed to load workbook: {e}")
         return {}
 
 def save_workbook_to_bytes(dfs: Dict[str, pd.DataFrame]) -> bytes:
@@ -90,7 +100,7 @@ def upsert_row(df: pd.DataFrame, row: dict, key=PRIMARY_KEY) -> pd.DataFrame:
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     return df
 
-def name_rank_first_last(row: pd.Series) -> str:
+def _name_rank_first_last(row: pd.Series) -> str:
     fn = str(row.get("FirstName") or "").strip()
     ln = str(row.get("LastName") or "").strip()
     rk = str(row.get("Rank") or "").strip()
@@ -103,7 +113,7 @@ def build_person_options(df: pd.DataFrame) -> list:
     elif "FullName" in df and df["FullName"].notna().any():
         s = df["FullName"].astype(str)
     elif all(c in df.columns for c in ["FirstName","LastName","Rank"]):
-        s = df.apply(name_rank_first_last, axis=1)
+        s = df.apply(_name_rank_first_last, axis=1)
     elif all(c in df.columns for c in ["FirstName","LastName"]):
         s = (df["FirstName"].fillna("").astype(str).str.strip() + " " + df["LastName"].fillna("").astype(str).str.strip()).str.strip()
     else:
@@ -114,7 +124,8 @@ def build_person_options(df: pd.DataFrame) -> list:
 def build_unit_options(df: pd.DataFrame) -> list:
     for col in ["UnitNumber","CallSign","Name"]:
         if col in df.columns and df[col].notna().any():
-            s = df[col].astype(str); break
+            s = df[col].astype(str)
+            break
     else:
         s = pd.Series([], dtype=str)
     vals = s.dropna().map(lambda x: x.strip()).replace("", pd.NA).dropna().unique().tolist()
@@ -124,15 +135,16 @@ def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     p = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA).copy()
     if not p.empty:
         mask_name_blank = p["Name"].isna() | (p["Name"].astype(str).str.strip()=="")
-        p.loc[mask_name_blank, "Name"] = p.loc[mask_name_blank].apply(name_rank_first_last, axis=1)
+        p.loc[mask_name_blank, "Name"] = p.loc[mask_name_blank].apply(_name_rank_first_last, axis=1)
         mask_full_blank = p["FullName"].isna() | (p["FullName"].astype(str).str.strip()=="")
-        p.loc[mask_full_blank, "FullName"] = p.loc[mask_full_blank].apply(name_rank_first_last, axis=1)
+        p.loc[mask_full_blank, "FullName"] = p.loc[mask_full_blank].apply(_name_rank_first_last, axis=1)
         if "Active" in p.columns:
             m = p["Active"].isna() | (p["Active"].astype(str).str.strip()=="")
             p.loc[m, "Active"] = "Yes"
         else:
             p["Active"] = "Yes"
     data["Personnel"] = p
+
     a = ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA).copy()
     if not a.empty:
         if "Active" in a.columns:
@@ -143,8 +155,29 @@ def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     data["Apparatus"] = a
     return data
 
+# ---- Permissions helpers
+def _coerce_bool(x):
+    s = str(x).strip().lower()
+    return s in ("1","true","yes","y")
+
+def apply_role_presets(df: pd.DataFrame) -> pd.DataFrame:
+    df = ensure_columns(df, USERS_SCHEMA).copy()
+    for i, row in df.iterrows():
+        role = str(row.get("Role","")).strip() or "Member"
+        preset = ROLE_PRESETS.get(role, ROLE_PRESETS["Member"])
+        for k, v in preset.items():
+            if pd.isna(row.get(k)) or str(row.get(k)).strip()=="":
+                df.at[i, k] = v
+    if "Active" in df.columns:
+        mask = df["Active"].isna() | (df["Active"].astype(str).str.strip()=="")
+        df.loc[mask, "Active"] = "Yes"
+    return df
+
+def can(user_row: dict, perm: str) -> bool:
+    return _coerce_bool(user_row.get(perm, False))
+
 # ---------------- Sidebar / Load ----------------
-st.sidebar.title("📝 Fire Incident Reports — v4.2.8 (Auth)")
+st.sidebar.title("📝 Fire Incident Reports — v4.3.0")
 file_path = st.sidebar.text_input("Excel path", value=DEFAULT_FILE, key="path_input_auth")
 uploaded = st.sidebar.file_uploader("Upload/replace workbook (.xlsx)", type=["xlsx"], key="upload_auth")
 if uploaded:
@@ -171,7 +204,7 @@ ensure_table(data, "Personnel", PERSONNEL_SCHEMA)
 ensure_table(data, "Apparatus", APPARATUS_SCHEMA)
 for t, cols in CHILD_TABLES.items(): ensure_table(data, t, cols)
 
-# Users (Auth)
+# Users
 users = ensure_columns(data.get("Users", pd.DataFrame()), USERS_SCHEMA)
 if users.empty or "Username" not in users.columns or users["Username"].isna().all():
     users = pd.DataFrame([
@@ -179,6 +212,7 @@ if users.empty or "Username" not in users.columns or users["Username"].isna().al
         {"Username":"review","Password":"review","Role":"Reviewer","FullName":"Reviewer","Active":"Yes"},
         {"Username":"member","Password":"member","Role":"Member","FullName":"Member User","Active":"Yes"},
     ])
+users = apply_role_presets(users)
 data["Users"] = users
 
 def sign_in_ui(users_df: pd.DataFrame):
@@ -189,8 +223,8 @@ def sign_in_ui(users_df: pd.DataFrame):
     if ok:
         row = users_df[(users_df["Username"].astype(str)==u) & (users_df["Password"].astype(str)==p) & (users_df["Active"].astype(str).str.lower().isin(["yes","true","1"]))]
         if not row.empty:
-            st.session_state["user"] = {"username": u, "role": row.iloc[0]["Role"], "name": row.iloc[0].get("FullName", u)}
-            st.success(f"Welcome, {st.session_state['user']['name']}!"); st.experimental_rerun()
+            st.session_state["user"] = row.iloc[0].to_dict()
+            st.success(f"Welcome, {row.iloc[0].get('FullName', u)}!"); st.experimental_rerun()
         else:
             st.error("Invalid credentials or inactive user.")
 
@@ -198,7 +232,7 @@ def sign_out_button():
     if st.button("Sign Out", key="btn_logout_auth"):
         st.session_state.pop("user", None); st.experimental_rerun()
 
-# Auto-repair rosters once on load (non-destructive)
+# Auto-repair rosters once on load
 data = repair_rosters(data)
 lookups = get_lookups(data)
 
@@ -206,29 +240,38 @@ lookups = get_lookups(data)
 if "user" not in st.session_state:
     sign_in_ui(data["Users"]); st.stop()
 user = st.session_state["user"]
-st.sidebar.write(f"**Logged in as:** {user['name']}  \nRole: {user['role']}")
+st.sidebar.write(f"**Logged in as:** {user.get('FullName', user.get('Username',''))}  \nRole: {user.get('Role','')}")
 sign_out_button()
 
 # ---------------- Tabs ----------------
-# New tabs: Rejected & Admin (User Management)
 tabs = st.tabs(["Write Report","Review Queue","Rejected","Rosters","Print","Export","Admin","Diagnostics"])
 
 # ---- Write Report
 with tabs[0]:
     st.header("Write Report")
-    master = data["Incidents"]
-    mode = st.radio("Mode", ["New","Edit"], horizontal=True, key="mode_write_auth")
+    master = data["Incidents"].copy()
+
+    # if something was just moved back to draft from Rejected, preselect it
+    preselect = st.session_state.get("edit_incident_preselect")
+    if preselect is not None:
+        st.info(f"Editing incident sent back to Draft: {preselect}")
+    mode = st.radio("Mode", ["New","Edit"], horizontal=True, index=1 if preselect else 0, key="mode_write_auth")
+
     defaults = {}; selected = None
     if mode == "Edit" and not master.empty:
-        # Admin/Reviewer see all; Members see their own
-        if user["role"] in ["Admin","Reviewer"]:
+        if can(user,"CanEditAll"):
             options_df = master
+        elif can(user,"CanEditOwn"):
+            options_df = master[master["CreatedBy"].astype(str) == user.get("Username")]
         else:
-            options_df = master[master["CreatedBy"].astype(str) == user["username"]]
+            options_df = master.iloc[0:0]
         options = options_df[PRIMARY_KEY].dropna().astype(str).tolist() if PRIMARY_KEY in options_df.columns else []
-        selected = st.selectbox("Select IncidentNumber", options=options, index=None, placeholder="Choose...", key="pick_edit_write_auth")
+        selected_index = options.index(preselect) if (preselect and preselect in options) else None
+        selected = st.selectbox("Select IncidentNumber", options=options, index=selected_index, placeholder="Choose...", key="pick_edit_write_auth")
         if selected:
             defaults = master[master[PRIMARY_KEY].astype(str) == selected].iloc[0].to_dict()
+    # clear preselect
+    st.session_state["edit_incident_preselect"] = None
 
     with st.container(border=True):
         st.subheader("Incident Details")
@@ -237,9 +280,9 @@ with tabs[0]:
         inc_date = c2.date_input("IncidentDate", value=pd.to_datetime(defaults.get("IncidentDate")).date() if defaults.get("IncidentDate") is not None and str(defaults.get("IncidentDate")) != "NaT" else date.today(), key="w_inc_date_auth")
         inc_time = c3.text_input("IncidentTime (HH:MM)", value=str(defaults.get("IncidentTime","")) if defaults else "", key="w_inc_time_auth")
         c4, c5, c6 = st.columns(3)
-        inc_type = c4.selectbox("IncidentType", options=[""]+lookups.get("IncidentType", []), index=0, key="w_type_auth")
-        inc_prio = c5.selectbox("ResponsePriority", options=[""]+lookups.get("ResponsePriority", []), index=0, key="w_prio_auth")
-        inc_alarm = c6.selectbox("AlarmLevel", options=[""]+lookups.get("AlarmLevel", []), index=0, key="w_alarm_auth")
+        inc_type = c4.selectbox("IncidentType", options=[""]+lookups.get("IncidentType", []), index=([""]+lookups.get("IncidentType", [])).index(str(defaults.get("IncidentType",""))) if defaults.get("IncidentType") in lookups.get("IncidentType", []) else 0, key="w_type_auth")
+        inc_prio = c5.selectbox("ResponsePriority", options=[""]+lookups.get("ResponsePriority", []), index=([""]+lookups.get("ResponsePriority", [])).index(str(defaults.get("ResponsePriority",""))) if defaults.get("ResponsePriority") in lookups.get("ResponsePriority", []) else 0, key="w_prio_auth")
+        inc_alarm = c6.selectbox("AlarmLevel", options=[""]+lookups.get("AlarmLevel", []), index=([""]+lookups.get("AlarmLevel", [])).index(str(defaults.get("AlarmLevel",""))) if defaults.get("AlarmLevel") in lookups.get("AlarmLevel", []) else 0, key="w_alarm_auth")
         c7, c8, c9 = st.columns(3)
         loc_name = c7.text_input("LocationName", value=str(defaults.get("LocationName","")) if defaults else "", key="w_locname_auth")
         addr = c8.text_input("Address", value=str(defaults.get("Address","")) if defaults else "", key="w_addr_auth")
@@ -341,11 +384,13 @@ with tabs[0]:
         "PostalCode": postal,
         "Shift": shift,
         "Narrative": narrative,
-        "CreatedBy": user["username"],
+        "CreatedBy": user.get("Username",""),
     }
     a = st.columns(3)
-    if a[0].button("Save Draft", key="w_save_draft_auth"):
-        if not row_vals[PRIMARY_KEY]:
+    if a[0].button("Save Draft", key="w_save_draft_btn"):
+        if not can(user,"CanWrite"):
+            st.error("You do not have permission to write.")
+        elif not row_vals[PRIMARY_KEY]:
             st.error("Enter **IncidentNumber** before saving.")
         else:
             row_vals["Status"] = "Draft"
@@ -353,8 +398,10 @@ with tabs[0]:
             if st.session_state.get("autosave", True):
                 save_to_path(data, file_path)
             st.success("Draft saved.")
-    if a[1].button("Submit for Review", key="w_submit_review_auth"):
-        if not row_vals[PRIMARY_KEY]:
+    if a[1].button("Submit for Review", key="w_submit_review_btn"):
+        if not can(user,"CanWrite"):
+            st.error("You do not have permission to submit.")
+        elif not row_vals[PRIMARY_KEY]:
             st.error("Enter **IncidentNumber** before submitting.")
         else:
             row_vals["Status"] = "Submitted"; row_vals["SubmittedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -373,7 +420,6 @@ with tabs[1]:
         sel = st.selectbox("Pick an Incident to review", options=pending[PRIMARY_KEY].astype(str).tolist(), index=None, placeholder="Choose...", key="pick_review_queue_auth")
     if sel:
         rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
-        # Friendly view with narrative
         st.subheader(f"Incident {sel}")
         st.write(f"**Type:** {rec.get('IncidentType','')}  |  **Priority:** {rec.get('ResponsePriority','')}  |  **Alarm:** {rec.get('AlarmLevel','')}")
         st.write(f"**Location:** {rec.get('Address','')} {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}")
@@ -381,36 +427,35 @@ with tabs[1]:
         st.text_area("Narrative (read-only)", value=str(rec.get("Narrative","")), height=240, key="narrative_readonly_review", disabled=True)
         comments = st.text_area("Reviewer Comments", key="rev_comments_queue_auth")
         c = st.columns(3)
-        if user["role"] in ["Admin","Reviewer"]:
+        if can(user,"CanReview"):
             if c[0].button("Approve", key="btn_approve_queue_auth"):
-                row = rec; row["Status"] = "Approved"; row["ReviewedBy"] = user["username"]; row["ReviewedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M"); row["ReviewerComments"] = comments
-                data["Incidents"] = upsert_row(data["Incidents"], row, key=PRIMARY_KEY)
-                if st.session_state.get("autosave", True):
-                    save_to_path(data, file_path)
-                st.success("Approved.")
+                if not can(user,"CanApprove"):
+                    st.error("No permission to approve.")
+                else:
+                    row = rec; row["Status"] = "Approved"; row["ReviewedBy"] = user.get("Username"); row["ReviewedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M"); row["ReviewerComments"] = comments
+                    data["Incidents"] = upsert_row(data["Incidents"], row, key=PRIMARY_KEY)
+                    if st.session_state.get("autosave", True): save_to_path(data, file_path)
+                    st.success("Approved.")
             if c[1].button("Reject", key="btn_reject_queue_auth"):
-                row = rec; row["Status"] = "Rejected"; row["ReviewedBy"] = user["username"]; row["ReviewedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M"); row["ReviewerComments"] = comments or "Please revise."
+                row = rec; row["Status"] = "Rejected"; row["ReviewedBy"] = user.get("Username"); row["ReviewedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M"); row["ReviewerComments"] = comments or "Please revise."
                 data["Incidents"] = upsert_row(data["Incidents"], row, key=PRIMARY_KEY)
-                if st.session_state.get("autosave", True):
-                    save_to_path(data, file_path)
+                if st.session_state.get("autosave", True): save_to_path(data, file_path)
                 st.warning("Rejected.")
             if c[2].button("Send back to Draft", key="btn_backtodraft_queue_auth"):
                 row = rec; row["Status"] = "Draft"; row["ReviewerComments"] = comments
                 data["Incidents"] = upsert_row(data["Incidents"], row, key=PRIMARY_KEY)
-                if st.session_state.get("autosave", True):
-                    save_to_path(data, file_path)
+                if st.session_state.get("autosave", True): save_to_path(data, file_path)
                 st.info("Moved back to Draft.")
         else:
-            st.info("You must be Reviewer/Admin to approve/reject.")
+            st.info("You must have review permission to approve/reject.")
 
-# ---- Rejected Queue (new)
+# ---- Rejected Queue
 with tabs[2]:
     st.header("Rejected Reports")
-    if user["role"] in ["Admin","Reviewer"]:
+    if can(user,"CanEditAll"):
         rejected = data["Incidents"][data["Incidents"]["Status"].astype(str) == "Rejected"]
     else:
-        # Members see only their own rejected
-        rejected = data["Incidents"][(data["Incidents"]["Status"].astype(str) == "Rejected") & (data["Incidents"]["CreatedBy"].astype(str) == user["username"])]
+        rejected = data["Incidents"][(data["Incidents"]["Status"].astype(str) == "Rejected") & (data["Incidents"]["CreatedBy"].astype(str) == user.get("Username"))]
     st.dataframe(rejected, use_container_width=True, hide_index=True, key="grid_rejected_auth")
     selr = None
     if not rejected.empty:
@@ -425,70 +470,99 @@ with tabs[2]:
         if c[0].button("Move back to Draft to Edit", key="btn_rejected_to_draft"):
             rec["Status"] = "Draft"
             data["Incidents"] = upsert_row(data["Incidents"], rec, key=PRIMARY_KEY)
-            if st.session_state.get("autosave", True):
-                save_to_path(data, file_path)
+            if st.session_state.get("autosave", True): save_to_path(data, file_path)
+            st.session_state["edit_incident_preselect"] = str(selr)
             st.success("Moved to Draft. Go to Write Report → Edit to revise and resubmit.")
 
 # ---- Rosters
 with tabs[3]:
     st.header("Rosters")
-    st.caption("Edit, then click Save to write changes into the Excel workbook. Use 'Repair roster now' if names are blank.")
-    personnel = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA)
-    personnel_edit = st.data_editor(personnel, num_rows="dynamic", use_container_width=True, key="editor_personnel_auth")
-    apparatus = ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA)
-    apparatus_edit = st.data_editor(apparatus, num_rows="dynamic", use_container_width=True, key="editor_apparatus_auth")
-    c = st.columns(3)
-    if c[0].button("Save Personnel to Excel", key="save_personnel_auth"):
-        data["Personnel"] = ensure_columns(personnel_edit, PERSONNEL_SCHEMA)
-        ok, err = save_to_path(data, file_path)
-        st.success("Saved.") if ok else st.error(err)
-    if c[1].button("Save Apparatus to Excel", key="save_apparatus_auth"):
-        data["Apparatus"] = ensure_columns(apparatus_edit, APPARATUS_SCHEMA)
-        ok, err = save_to_path(data, file_path)
-        st.success("Saved.") if ok else st.error(err)
-    if c[2].button("Repair roster now (fill names & Active)", key="repair_now_auth"):
-        data = repair_rosters(data)
-        ok, err = save_to_path(data, file_path)
-        if ok: st.success("Roster repaired and saved. Reload to see updates.")
-        else: st.error(err)
+    if not can(user,"CanEditRosters"):
+        st.info("You do not have permission to edit rosters.")
+    else:
+        st.caption("Edit, then click Save. Use 'Repair roster now' if names are blank.")
+        personnel = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA)
+        personnel_edit = st.data_editor(personnel, num_rows="dynamic", use_container_width=True, key="editor_personnel_auth")
+        apparatus = ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA)
+        apparatus_edit = st.data_editor(apparatus, num_rows="dynamic", use_container_width=True, key="editor_apparatus_auth")
+        c = st.columns(3)
+        if c[0].button("Save Personnel to Excel", key="save_personnel_auth"):
+            data["Personnel"] = ensure_columns(personnel_edit, PERSONNEL_SCHEMA)
+            ok, err = save_to_path(data, file_path)
+            st.success("Saved.") if ok else st.error(err)
+        if c[1].button("Save Apparatus to Excel", key="save_apparatus_auth"):
+            data["Apparatus"] = ensure_columns(apparatus_edit, APPARATUS_SCHEMA)
+            ok, err = save_to_path(data, file_path)
+            st.success("Saved.") if ok else st.error(err)
+        if c[2].button("Repair roster now (fill names & Active)", key="repair_now_auth"):
+            data = repair_rosters(data)
+            ok, err = save_to_path(data, file_path)
+            if ok: st.success("Roster repaired and saved. Reload to see updates.")
+            else: st.error(err)
 
 # ---- Print
 with tabs[4]:
     st.header("Print")
-    status = st.selectbox("Filter by Status", options=["","Approved","Submitted","Draft","Rejected"], key="print_status_auth")
-    base = data["Incidents"].copy()
-    if status: base = base[base["Status"].astype(str) == status]
-    st.dataframe(base, use_container_width=True, hide_index=True, key="grid_print_auth")
-    sel = None
-    if not base.empty:
-        sel = st.selectbox("Pick an Incident", options=base[PRIMARY_KEY].astype(str).tolist(), index=None, key="print_pick_auth")
-    if sel:
-        rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
-        st.json(rec, expanded=False)
+    if not can(user,"CanPrint"):
+        st.info("You do not have permission to print/export.")
+    else:
+        status = st.selectbox("Filter by Status", options=["","Approved","Submitted","Draft","Rejected"], key="print_status_auth")
+        base = data["Incidents"].copy()
+        if status: base = base[base["Status"].astype(str) == status]
+        st.dataframe(base, use_container_width=True, hide_index=True, key="grid_print_auth")
+        sel = None
+        if not base.empty:
+            sel = st.selectbox("Pick an Incident", options=base[PRIMARY_KEY].astype(str).tolist(), index=None, key="print_pick_auth")
+        if sel:
+            rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
+            st.subheader(f"Incident {sel}")
+            st.write(f"**Type:** {rec.get('IncidentType','')}  |  **Priority:** {rec.get('ResponsePriority','')}  |  **Alarm:** {rec.get('AlarmLevel','')}")
+            st.write(f"**Location:** {rec.get('Address','')} {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}")
+            st.write("**Narrative:**")
+            st.text_area("Narrative (read-only)", value=str(rec.get("Narrative","")), height=220, key="narrative_readonly_print", disabled=True)
+
+            # Show personnel/app for this incident
+            ip = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
+            ia = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
+            ip_view = ip[ip[PRIMARY_KEY].astype(str) == str(sel)]
+            ia_view = ia[ia[PRIMARY_KEY].astype(str) == str(sel)]
+            st.markdown(f"**Personnel on Scene ({len(ip_view)}):**")
+            if not ip_view.empty:
+                st.dataframe(ip_view[["Name","Role","Hours"]], use_container_width=True, hide_index=True, key="grid_print_personnel")
+            else:
+                st.write("_None recorded._")
+            st.markdown(f"**Apparatus on Scene ({len(ia_view)}):**")
+            if not ia_view.empty:
+                show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
+                st.dataframe(ia_view[show_cols], use_container_width=True, hide_index=True, key="grid_print_apparatus")
+            else:
+                st.write("_None recorded._")
 
 # ---- Export
 with tabs[5]:
     st.header("Export")
-    if st.button("Build Excel for Download", key="btn_build_export_auth"):
-        payload = save_workbook_to_bytes(data)
-        st.download_button("Download Excel", data=payload, file_name="fire_incident_db_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_export_auth")
-    if st.button("Overwrite Source File Now", key="btn_overwrite_source_auth"):
-        ok, err = save_to_path(data, file_path)
-        if ok: st.success(f"Wrote: {file_path}")
-        else: st.error(f"Failed: {err}")
+    if not can(user,"CanPrint"):
+        st.info("You do not have permission to export.")
+    else:
+        if st.button("Build Excel for Download", key="btn_build_export_auth"):
+            payload = save_workbook_to_bytes(data)
+            st.download_button("Download Excel", data=payload, file_name="fire_incident_db_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_export_auth")
+        if st.button("Overwrite Source File Now", key="btn_overwrite_source_auth"):
+            ok, err = save_to_path(data, file_path)
+            if ok: st.success(f"Wrote: {file_path}")
+            else: st.error(f"Failed: {err}")
 
 # ---- Admin (User Management)
 with tabs[6]:
-    st.header("Admin — User Management")
-    if user["role"] != "Admin":
+    st.header("Admin — User Management & Permissions")
+    if not can(user,"CanManageUsers"):
         st.info("Admin only.")
     else:
-        st.caption("Add/edit users. 'Active' must be Yes/True/1 to allow sign-in.")
-        users_df = ensure_columns(data.get("Users", pd.DataFrame()), USERS_SCHEMA)
+        st.caption("Role presets fill missing permissions; override any value with Yes/No/True/False.")
+        users_df = apply_role_presets(ensure_columns(data.get("Users", pd.DataFrame()), USERS_SCHEMA))
         users_edit = st.data_editor(users_df, num_rows="dynamic", use_container_width=True, key="editor_users_auth")
         c = st.columns(3)
         if c[0].button("Save Users to Excel", key="save_users_auth"):
-            # Basic sanity: ensure required cols
             users_edit = ensure_columns(users_edit, USERS_SCHEMA)
             ok, err = save_to_path({**data, "Users": users_edit}, file_path)
             if ok:
@@ -498,11 +572,13 @@ with tabs[6]:
                 st.error(err)
         if c[1].button("Add Reviewer Template Row", key="add_reviewer_template"):
             templ = {"Username":"reviewer2","Password":"changeme","Role":"Reviewer","FullName":"New Reviewer","Active":"Yes"}
+            templ.update(ROLE_PRESETS["Reviewer"])
             users_edit = pd.concat([users_edit, pd.DataFrame([templ])], ignore_index=True)
             st.session_state["editor_users_auth"] = users_edit
             st.info("Template row added. Edit then Save Users to Excel.")
         if c[2].button("Add Member Template Row", key="add_member_template"):
             templ = {"Username":"member2","Password":"changeme","Role":"Member","FullName":"New Member","Active":"Yes"}
+            templ.update(ROLE_PRESETS["Member"])
             users_edit = pd.concat([users_edit, pd.DataFrame([templ])], ignore_index=True)
             st.session_state["editor_users_auth"] = users_edit
             st.info("Template row added. Edit then Save Users to Excel.")
