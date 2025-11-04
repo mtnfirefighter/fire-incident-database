@@ -7,7 +7,6 @@ import streamlit as st
 
 st.set_page_config(page_title="Fire Incident Reports", page_icon="📝", layout="wide")
 
-# ---------------- Config ----------------
 DEFAULT_FILE = os.path.join(os.path.dirname(__file__), "fire_incident_db.xlsx")
 PRIMARY_KEY = "IncidentNumber"
 
@@ -17,7 +16,6 @@ CHILD_TABLES = {
     "Incident_Apparatus": ["IncidentNumber","Unit","UnitType","Role","Actions"],
     "Incident_Actions": ["IncidentNumber","Action","Notes"],
 }
-
 PERSONNEL_SCHEMA = ["PersonnelID","Name","UnitNumber","Rank","Badge","Phone","Email","Address","City","State","PostalCode","Certifications","Active","FirstName","LastName","FullName"]
 APPARATUS_SCHEMA = ["ApparatusID","UnitNumber","CallSign","UnitType","GPM","TankSize","SeatingCapacity","Station","Active","Name"]
 USERS_SCHEMA = ["Username","Password","Role","FullName","Active",
@@ -39,7 +37,6 @@ ROLE_PRESETS = {
     "Member":  {"CanWrite":True,"CanEditOwn":True,"CanEditAll":False,"CanReview":False,"CanApprove":False,"CanManageUsers":False,"CanEditRosters":False,"CanPrint":True},
 }
 
-# ---------------- Utils ----------------
 def load_workbook(path: str) -> Dict[str, pd.DataFrame]:
     try:
         xls = pd.ExcelFile(path)
@@ -124,8 +121,7 @@ def build_person_options(df: pd.DataFrame) -> list:
 def build_unit_options(df: pd.DataFrame) -> list:
     for col in ["UnitNumber","CallSign","Name"]:
         if col in df.columns and df[col].notna().any():
-            s = df[col].astype(str)
-            break
+            s = df[col].astype(str); break
     else:
         s = pd.Series([], dtype=str)
     vals = s.dropna().map(lambda x: x.strip()).replace("", pd.NA).dropna().unique().tolist()
@@ -133,6 +129,9 @@ def build_unit_options(df: pd.DataFrame) -> list:
 
 def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     p = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA).copy()
+    # Force Rank to string so letters are allowed
+    if "Rank" in p.columns and not p.empty:
+        p["Rank"] = p["Rank"].astype(str)
     if not p.empty:
         mask_name_blank = p["Name"].isna() | (p["Name"].astype(str).str.strip()=="")
         p.loc[mask_name_blank, "Name"] = p.loc[mask_name_blank].apply(_name_rank_first_last, axis=1)
@@ -155,7 +154,6 @@ def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     data["Apparatus"] = a
     return data
 
-# ---- Permissions helpers
 def _coerce_bool(x):
     s = str(x).strip().lower()
     return s in ("1","true","yes","y")
@@ -176,8 +174,8 @@ def apply_role_presets(df: pd.DataFrame) -> pd.DataFrame:
 def can(user_row: dict, perm: str) -> bool:
     return _coerce_bool(user_row.get(perm, False))
 
-# ---------------- Sidebar / Load ----------------
-st.sidebar.title("📝 Fire Incident Reports — v4.3.0")
+# Sidebar / load
+st.sidebar.title("📝 Fire Incident Reports — v4.3.1")
 file_path = st.sidebar.text_input("Excel path", value=DEFAULT_FILE, key="path_input_auth")
 uploaded = st.sidebar.file_uploader("Upload/replace workbook (.xlsx)", type=["xlsx"], key="upload_auth")
 if uploaded:
@@ -194,7 +192,7 @@ else:
     st.info("Upload or point to your Excel workbook to begin.")
     st.stop()
 
-# Ensure required tables
+# Ensure tables
 ensure_table(data, "Incidents", [
     PRIMARY_KEY,"IncidentDate","IncidentTime","IncidentType","ResponsePriority","AlarmLevel","Shift",
     "LocationName","Address","City","State","PostalCode","Latitude","Longitude",
@@ -232,30 +230,31 @@ def sign_out_button():
     if st.button("Sign Out", key="btn_logout_auth"):
         st.session_state.pop("user", None); st.experimental_rerun()
 
-# Auto-repair rosters once on load
+# Repair rosters (enforce Rank as string)
 data = repair_rosters(data)
 lookups = get_lookups(data)
 
-# Require login
+# Auth gate
 if "user" not in st.session_state:
     sign_in_ui(data["Users"]); st.stop()
 user = st.session_state["user"]
 st.sidebar.write(f"**Logged in as:** {user.get('FullName', user.get('Username',''))}  \nRole: {user.get('Role','')}")
 sign_out_button()
 
-# ---------------- Tabs ----------------
-tabs = st.tabs(["Write Report","Review Queue","Rejected","Rosters","Print","Export","Admin","Diagnostics"])
+tabs = st.tabs(["Write Report","Review Queue","Rejected","Approved","Rosters","Print","Export","Admin","Diagnostics"])
 
-# ---- Write Report
+# Write Report
 with tabs[0]:
     st.header("Write Report")
     master = data["Incidents"].copy()
 
-    # if something was just moved back to draft from Rejected, preselect it
+    # Preselect if returning from Rejected
     preselect = st.session_state.get("edit_incident_preselect")
-    if preselect is not None:
+    force_edit = st.session_state.get("force_edit_mode", False)
+    if preselect:
         st.info(f"Editing incident sent back to Draft: {preselect}")
-    mode = st.radio("Mode", ["New","Edit"], horizontal=True, index=1 if preselect else 0, key="mode_write_auth")
+    mode_index = 1 if (preselect or force_edit) else 0
+    mode = st.radio("Mode", ["New","Edit"], horizontal=True, index=mode_index, key="mode_write_auth")
 
     defaults = {}; selected = None
     if mode == "Edit" and not master.empty:
@@ -266,12 +265,15 @@ with tabs[0]:
         else:
             options_df = master.iloc[0:0]
         options = options_df[PRIMARY_KEY].dropna().astype(str).tolist() if PRIMARY_KEY in options_df.columns else []
-        selected_index = options.index(preselect) if (preselect and preselect in options) else None
-        selected = st.selectbox("Select IncidentNumber", options=options, index=selected_index, placeholder="Choose...", key="pick_edit_write_auth")
+        kwargs = {"options": options, "placeholder": "Choose...", "key": "pick_edit_write_auth"}
+        if preselect and preselect in options:
+            kwargs["index"] = options.index(preselect)
+        selected = st.selectbox("Select IncidentNumber", **kwargs)
         if selected:
             defaults = master[master[PRIMARY_KEY].astype(str) == selected].iloc[0].to_dict()
-    # clear preselect
-    st.session_state["edit_incident_preselect"] = None
+            # only clear once we loaded defaults
+            st.session_state["edit_incident_preselect"] = None
+            st.session_state["force_edit_mode"] = False
 
     with st.container(border=True):
         st.subheader("Incident Details")
@@ -299,6 +301,9 @@ with tabs[0]:
     with st.container(border=True):
         st.subheader("All Members on Scene")
         people_df = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA)
+        # enforce Rank string (again, if user edited live)
+        if "Rank" in people_df.columns:
+            people_df["Rank"] = people_df["Rank"].astype(str)
         person_opts = build_person_options(people_df)
         picked_people = st.multiselect("Pick members", options=person_opts, key="w_pick_people_auth")
         roles = lookups.get("Role", ["OIC","Driver","Firefighter"])
@@ -314,15 +319,20 @@ with tabs[0]:
                 new = [{PRIMARY_KEY: inc_key, "Name": n, "Role": role_default, "Hours": hours_default} for n in picked_people]
                 if new:
                     data["Incident_Personnel"] = pd.concat([df, pd.DataFrame(new)], ignore_index=True)
-                    if st.session_state.get("autosave", True):
-                        save_to_path(data, file_path)
+                    if st.session_state.get("autosave", True): save_to_path(data, file_path)
                     st.success(f"Added {len(new)} member(s) to incident {inc_key}.")
                 else:
                     st.warning("No members selected.")
         cur_per = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
-        cur_view = cur_per[cur_per[PRIMARY_KEY].astype(str) == (str(inc_num).strip() if inc_num else "__none__")]
-        st.write(f"**Total Personnel on Scene:** {0 if cur_view.empty else len(cur_view)}")
-        st.dataframe(cur_view, use_container_width=True, hide_index=True)
+        this_per = cur_per[cur_per[PRIMARY_KEY].astype(str) == (str(inc_num).strip() if inc_num else "__none__")].copy()
+        st.write(f"**Total Personnel on Scene:** {0 if this_per.empty else len(this_per)}")
+        this_per = st.data_editor(this_per, num_rows="dynamic", use_container_width=True, key="editor_incident_personnel")
+        if st.button("Save Personnel Grid", key="btn_save_incident_personnel"):
+            # replace all rows for this incident with edited grid
+            base = cur_per[cur_per[PRIMARY_KEY].astype(str) != (str(inc_num).strip() if inc_num else "__none__")]
+            data["Incident_Personnel"] = pd.concat([base, this_per], ignore_index=True)
+            if st.session_state.get("autosave", True): save_to_path(data, file_path)
+            st.success("Incident personnel updated.")
 
     with st.container(border=True):
         st.subheader("Apparatus on Scene")
@@ -341,15 +351,19 @@ with tabs[0]:
                 new = [{PRIMARY_KEY: inc_key, "Unit": u, "UnitType": (unit_type if unit_type else None), "Role": unit_role, "Actions": ""} for u in picked_units]
                 if new:
                     data["Incident_Apparatus"] = pd.concat([df, pd.DataFrame(new)], ignore_index=True)
-                    if st.session_state.get("autosave", True):
-                        save_to_path(data, file_path)
+                    if st.session_state.get("autosave", True): save_to_path(data, file_path)
                     st.success(f"Added {len(new)} unit(s) to incident {inc_key}.")
                 else:
                     st.warning("No units selected.")
         cur_app = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
-        cur_app_view = cur_app[cur_app[PRIMARY_KEY].astype(str) == (str(inc_num).strip() if inc_num else "__none__")]
-        st.write(f"**Total Apparatus on Scene:** {0 if cur_app_view.empty else len(cur_app_view)}")
-        st.dataframe(cur_app_view, use_container_width=True, hide_index=True)
+        this_app = cur_app[cur_app[PRIMARY_KEY].astype(str) == (str(inc_num).strip() if inc_num else "__none__")].copy()
+        st.write(f"**Total Apparatus on Scene:** {0 if this_app.empty else len(this_app)}")
+        this_app = st.data_editor(this_app, num_rows="dynamic", use_container_width=True, key="editor_incident_apparatus")
+        if st.button("Save Apparatus Grid", key="btn_save_incident_apparatus"):
+            base = cur_app[cur_app[PRIMARY_KEY].astype(str) != (str(inc_num).strip() if inc_num else "__none__")]
+            data["Incident_Apparatus"] = pd.concat([base, this_app], ignore_index=True)
+            if st.session_state.get("autosave", True): save_to_path(data, file_path)
+            st.success("Incident apparatus updated.")
 
     with st.container(border=True):
         st.subheader("Times (optional)")
@@ -366,8 +380,7 @@ with tabs[0]:
                 times = data["Incident_Times"]
                 new = {PRIMARY_KEY: inc_key, "Alarm": alarm, "Enroute": enroute, "Arrival": arrival, "Clear": clear}
                 data["Incident_Times"] = upsert_row(times, new, key=PRIMARY_KEY)
-                if st.session_state.get("autosave", True):
-                    save_to_path(data, file_path)
+                if st.session_state.get("autosave", True): save_to_path(data, file_path)
                 st.success("Times saved.")
 
     row_vals = {
@@ -395,8 +408,7 @@ with tabs[0]:
         else:
             row_vals["Status"] = "Draft"
             data["Incidents"] = upsert_row(data["Incidents"], row_vals, key=PRIMARY_KEY)
-            if st.session_state.get("autosave", True):
-                save_to_path(data, file_path)
+            if st.session_state.get("autosave", True): save_to_path(data, file_path)
             st.success("Draft saved.")
     if a[1].button("Submit for Review", key="w_submit_review_btn"):
         if not can(user,"CanWrite"):
@@ -406,11 +418,10 @@ with tabs[0]:
         else:
             row_vals["Status"] = "Submitted"; row_vals["SubmittedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             data["Incidents"] = upsert_row(data["Incidents"], row_vals, key=PRIMARY_KEY)
-            if st.session_state.get("autosave", True):
-                save_to_path(data, file_path)
+            if st.session_state.get("autosave", True): save_to_path(data, file_path)
             st.success("Submitted for review.")
 
-# ---- Review Queue
+# Review Queue
 with tabs[1]:
     st.header("Review Queue")
     pending = data["Incidents"][data["Incidents"]["Status"].astype(str) == "Submitted"]
@@ -449,7 +460,7 @@ with tabs[1]:
         else:
             st.info("You must have review permission to approve/reject.")
 
-# ---- Rejected Queue
+# Rejected
 with tabs[2]:
     st.header("Rejected Reports")
     if can(user,"CanEditAll"):
@@ -472,16 +483,53 @@ with tabs[2]:
             data["Incidents"] = upsert_row(data["Incidents"], rec, key=PRIMARY_KEY)
             if st.session_state.get("autosave", True): save_to_path(data, file_path)
             st.session_state["edit_incident_preselect"] = str(selr)
+            st.session_state["force_edit_mode"] = True
             st.success("Moved to Draft. Go to Write Report → Edit to revise and resubmit.")
 
-# ---- Rosters
+# Approved (new)
 with tabs[3]:
+    st.header("Approved Reports")
+    approved = data["Incidents"][data["Incidents"]["Status"].astype(str) == "Approved"]
+    st.dataframe(approved, use_container_width=True, hide_index=True, key="grid_approved_auth")
+    sela = None
+    if not approved.empty:
+        sela = st.selectbox("Pick an Approved Incident", options=approved[PRIMARY_KEY].astype(str).tolist(), index=None, placeholder="Choose...", key="pick_approved_auth")
+    if sela:
+        rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sela].iloc[0].to_dict()
+        st.subheader(f"Incident {sela}")
+        st.write(f"**Type:** {rec.get('IncidentType','')}  |  **Priority:** {rec.get('ResponsePriority','')}  |  **Alarm:** {rec.get('AlarmLevel','')}")
+        st.write(f"**Date/Time:** {rec.get('IncidentDate','')} {rec.get('IncidentTime','')}")
+        st.write(f"**Location:** {rec.get('LocationName','')} — {rec.get('Address','')} {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}")
+        st.write(f"**Shift:** {rec.get('Shift','')}  |  **Reviewed By:** {rec.get('ReviewedBy','')} at {rec.get('ReviewedAt','')}")
+        st.write("**Narrative:**")
+        st.text_area("Narrative (read-only)", value=str(rec.get("Narrative","")), height=260, key="narrative_readonly_approved", disabled=True)
+
+        ip = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
+        ia = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
+        ip_view = ip[ip[PRIMARY_KEY].astype(str) == str(sela)]
+        ia_view = ia[ia[PRIMARY_KEY].astype(str) == str(sela)]
+        st.markdown(f"**Personnel on Scene ({len(ip_view)}):**")
+        if not ip_view.empty:
+            st.dataframe(ip_view[["Name","Role","Hours"]], use_container_width=True, hide_index=True, key="grid_approved_personnel")
+        else:
+            st.write("_None recorded._")
+        st.markdown(f"**Apparatus on Scene ({len(ia_view)}):**")
+        if not ia_view.empty:
+            show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
+            st.dataframe(ia_view[show_cols], use_container_width=True, hide_index=True, key="grid_approved_apparatus")
+        else:
+            st.write("_None recorded._")
+
+# Rosters
+with tabs[4]:
     st.header("Rosters")
     if not can(user,"CanEditRosters"):
         st.info("You do not have permission to edit rosters.")
     else:
-        st.caption("Edit, then click Save. Use 'Repair roster now' if names are blank.")
+        st.caption("Edit, then click Save. Rank is free text (letters allowed). Use 'Repair roster now' if names are blank.")
         personnel = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA)
+        if "Rank" in personnel.columns:
+            personnel["Rank"] = personnel["Rank"].astype(str)
         personnel_edit = st.data_editor(personnel, num_rows="dynamic", use_container_width=True, key="editor_personnel_auth")
         apparatus = ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA)
         apparatus_edit = st.data_editor(apparatus, num_rows="dynamic", use_container_width=True, key="editor_apparatus_auth")
@@ -500,8 +548,8 @@ with tabs[3]:
             if ok: st.success("Roster repaired and saved. Reload to see updates.")
             else: st.error(err)
 
-# ---- Print
-with tabs[4]:
+# Print
+with tabs[5]:
     st.header("Print")
     if not can(user,"CanPrint"):
         st.info("You do not have permission to print/export.")
@@ -520,26 +568,18 @@ with tabs[4]:
             st.write(f"**Location:** {rec.get('Address','')} {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}")
             st.write("**Narrative:**")
             st.text_area("Narrative (read-only)", value=str(rec.get("Narrative","")), height=220, key="narrative_readonly_print", disabled=True)
-
-            # Show personnel/app for this incident
             ip = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
             ia = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
             ip_view = ip[ip[PRIMARY_KEY].astype(str) == str(sel)]
             ia_view = ia[ia[PRIMARY_KEY].astype(str) == str(sel)]
             st.markdown(f"**Personnel on Scene ({len(ip_view)}):**")
-            if not ip_view.empty:
-                st.dataframe(ip_view[["Name","Role","Hours"]], use_container_width=True, hide_index=True, key="grid_print_personnel")
-            else:
-                st.write("_None recorded._")
+            st.dataframe(ip_view[["Name","Role","Hours"]] if not ip_view.empty else ip_view, use_container_width=True, hide_index=True, key="grid_print_personnel")
             st.markdown(f"**Apparatus on Scene ({len(ia_view)}):**")
-            if not ia_view.empty:
-                show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
-                st.dataframe(ia_view[show_cols], use_container_width=True, hide_index=True, key="grid_print_apparatus")
-            else:
-                st.write("_None recorded._")
+            show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
+            st.dataframe(ia_view[show_cols] if not ia_view.empty else ia_view, use_container_width=True, hide_index=True, key="grid_print_apparatus")
 
-# ---- Export
-with tabs[5]:
+# Export
+with tabs[6]:
     st.header("Export")
     if not can(user,"CanPrint"):
         st.info("You do not have permission to export.")
@@ -552,13 +592,13 @@ with tabs[5]:
             if ok: st.success(f"Wrote: {file_path}")
             else: st.error(f"Failed: {err}")
 
-# ---- Admin (User Management)
-with tabs[6]:
+# Admin
+with tabs[7]:
     st.header("Admin — User Management & Permissions")
     if not can(user,"CanManageUsers"):
         st.info("Admin only.")
     else:
-        st.caption("Role presets fill missing permissions; override any value with Yes/No/True/False.")
+        st.caption("Role presets fill missing permissions; override with Yes/No/True/False.")
         users_df = apply_role_presets(ensure_columns(data.get("Users", pd.DataFrame()), USERS_SCHEMA))
         users_edit = st.data_editor(users_df, num_rows="dynamic", use_container_width=True, key="editor_users_auth")
         c = st.columns(3)
@@ -583,8 +623,8 @@ with tabs[6]:
             st.session_state["editor_users_auth"] = users_edit
             st.info("Template row added. Edit then Save Users to Excel.")
 
-# ---- Diagnostics
-with tabs[7]:
+# Diagnostics
+with tabs[8]:
     st.header("Diagnostics")
     st.write(f"**App dir:** {os.path.dirname(__file__)}")
     st.write(f"**Excel path:** {file_path}  |  Exists: {'✅' if os.path.exists(file_path) else '❌'}")
