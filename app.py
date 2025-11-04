@@ -131,35 +131,48 @@ def build_unit_label_series(df: pd.DataFrame) -> pd.Series:
     src = src.dropna().map(lambda s: s.strip()).replace("", pd.NA).dropna().unique().tolist()
     return pd.Series(sorted(set(src)))
 
-def printable_incident(data: Dict[str, pd.DataFrame], incident_number: str):
-    st.header(f"Incident Report — #{incident_number}")
-    inc = data.get("Incidents", pd.DataFrame())
-    row = inc[inc[PRIMARY_KEY].astype(str) == str(incident_number)]
-    if row.empty: st.warning("Incident not found."); return
-    rec = row.iloc[0].to_dict()
-    cols = st.columns(2)
-    left_keys = ["IncidentNumber","IncidentDate","IncidentTime","IncidentType","ResponsePriority","AlarmLevel","Shift"]
-    right_keys = ["LocationName","Address","City","State","PostalCode"]
-    with cols[0]:
-        for k in left_keys:
-            if k in rec: st.write(f"**{k}:** {rec.get(k,'')}")
-    with cols[1]:
-        for k in right_keys:
-            if k in rec: st.write(f"**{k}:** {rec.get(k,'')}")
-    st.write(f"**Status:** {rec.get('Status','')}  —  **CreatedBy:** {rec.get('CreatedBy','')}")
-    if rec.get("ReviewerComments"): st.write(f"**ReviewerComments:** {rec.get('ReviewerComments')}")
-    if "Narrative" in rec and pd.notna(rec["Narrative"]):
-        st.subheader("Narrative"); st.write(rec["Narrative"])
-    per = data.get("Incident_Personnel", pd.DataFrame()); app = data.get("Incident_Apparatus", pd.DataFrame())
-    if not per.empty:
-        v = per[per[PRIMARY_KEY].astype(str) == str(incident_number)]
-        if not v.empty:
-            st.subheader("Incident Personnel"); st.dataframe(v, use_container_width=True, hide_index=True)
-    if not app.empty:
-        v = app[app[PRIMARY_KEY].astype(str) == str(incident_number)]
-        if not v.empty:
-            st.subheader("Incident Apparatus"); st.dataframe(v, use_container_width=True, hide_index=True)
+# ---------------- App Boot ----------------
+st.sidebar.title("📝 Fire Incident Reports")
+file_path = st.sidebar.text_input("Excel path", value=DEFAULT_FILE, key="sidebar_path")
+uploaded = st.sidebar.file_uploader("Upload/replace workbook (.xlsx)", type=["xlsx"], key="sidebar_upload")
+if uploaded:
+    with open(file_path, "wb") as f: f.write(uploaded.read())
+    st.sidebar.success(f"Saved to {file_path}")
+st.session_state.setdefault("autosave", True)
+st.session_state["autosave"] = st.sidebar.toggle("Autosave to Excel", value=True)
+st.session_state.setdefault("filter_active_only", True)
+st.session_state["filter_active_only"] = st.sidebar.toggle("Show ACTIVE roster only", value=True)
+st.session_state.setdefault("roster_source", "app")
+st.session_state["roster_source"] = st.sidebar.selectbox("Roster source", options=["app","excel"], index=0, help="Use the live in‑app roster (session) or read directly from the Excel file.")
 
+data: Dict[str, pd.DataFrame] = {}
+if os.path.exists(file_path): data = load_workbook(file_path)
+if not data: st.info("Upload or point to your Excel workbook to begin."); st.stop()
+
+# Ensure tables exist
+for name, cols in {
+    "Incidents":[
+        PRIMARY_KEY,"IncidentDate","IncidentTime","IncidentType","ResponsePriority","AlarmLevel","Shift",
+        "LocationName","Address","City","State","PostalCode","Latitude","Longitude",
+        "Narrative","Status","CreatedBy","SubmittedAt","ReviewedBy","ReviewedAt","ReviewerComments"
+    ],
+    "Personnel":PERSONNEL_SCHEMA,
+    "Apparatus":APPARATUS_SCHEMA,
+    "Incident_Times":CHILD_TABLES["Incident_Times"],
+    "Incident_Personnel":CHILD_TABLES["Incident_Personnel"],
+    "Incident_Apparatus":CHILD_TABLES["Incident_Apparatus"],
+    "Incident_Actions":CHILD_TABLES["Incident_Actions"],
+}.items():
+    if name not in data: data[name] = pd.DataFrame(columns=cols)
+    else: data[name] = ensure_columns(data[name], cols)
+
+# Seed session_state rosters if not present
+st.session_state.setdefault("roster_personnel", data["Personnel"].copy())
+st.session_state.setdefault("roster_apparatus", data["Apparatus"].copy())
+
+lookups = get_lookups(data)
+
+# ---------- Auth (simple built-in demo users) ----------
 def ensure_default_users(data: Dict[str, pd.DataFrame]):
     users = data.get("Users", pd.DataFrame())
     if users.empty or "Username" not in users.columns:
@@ -187,49 +200,25 @@ def sign_out_button():
     if st.button("Sign Out", key="btn_logout"):
         st.session_state.pop("user", None); st.experimental_rerun()
 
-st.sidebar.title("📝 Fire Incident Reports")
-file_path = st.sidebar.text_input("Excel path", value=DEFAULT_FILE, key="sidebar_path")
-uploaded = st.sidebar.file_uploader("Upload/replace workbook (.xlsx)", type=["xlsx"], key="sidebar_upload")
-if uploaded:
-    with open(file_path, "wb") as f: f.write(uploaded.read())
-    st.sidebar.success(f"Saved to {file_path}")
-st.session_state.setdefault("autosave", True)
-st.session_state["autosave"] = st.sidebar.toggle("Autosave to Excel", value=True)
-st.session_state.setdefault("filter_active_only", True)
-st.session_state["filter_active_only"] = st.sidebar.toggle("Show ACTIVE roster only", value=True)
-
-data: Dict[str, pd.DataFrame] = {}
-if os.path.exists(file_path): data = load_workbook(file_path)
-if not data: st.info("Upload or point to your Excel workbook to begin."); st.stop()
-
-# Ensure tables
-for name, cols in {
-    "Incidents":[
-        PRIMARY_KEY,"IncidentDate","IncidentTime","IncidentType","ResponsePriority","AlarmLevel","Shift",
-        "LocationName","Address","City","State","PostalCode","Latitude","Longitude",
-        "Narrative","Status","CreatedBy","SubmittedAt","ReviewedBy","ReviewedAt","ReviewerComments"
-    ],
-    "Personnel":PERSONNEL_SCHEMA,
-    "Apparatus":APPARATUS_SCHEMA,
-    "Incident_Times":CHILD_TABLES["Incident_Times"],
-    "Incident_Personnel":CHILD_TABLES["Incident_Personnel"],
-    "Incident_Apparatus":CHILD_TABLES["Incident_Apparatus"],
-    "Incident_Actions":CHILD_TABLES["Incident_Actions"],
-}.items():
-    if name not in data: data[name] = pd.DataFrame(columns=cols)
-    else: data[name] = ensure_columns(data[name], cols)
-
-lookups = get_lookups(data)
 data = ensure_default_users(data)
-
 if "user" not in st.session_state:
     sign_in_ui(data["Users"]); st.stop()
 user = st.session_state["user"]
 st.sidebar.write(f"**Logged in as:** {user['name']}  \\nRole: {user['role']}")
 sign_out_button()
 
+# --------------- Tabs ---------------
 tabs = st.tabs(["Write Report","Review Queue","Rosters","Print","Export"])
 
+# Helper: choose roster frame (app vs excel)
+def get_roster(table: str) -> pd.DataFrame:
+    use_app = st.session_state.get("roster_source","app") == "app"
+    if use_app:
+        return st.session_state["roster_personnel"].copy() if table == "Personnel" else st.session_state["roster_apparatus"].copy()
+    else:
+        return data[table].copy()
+
+# ---- Write Report
 with tabs[0]:
     st.header("Write Report")
     master = data["Incidents"]
@@ -265,14 +254,27 @@ with tabs[0]:
         st.subheader("Narrative")
         narrative = st.text_area("Write full narrative here", value=str(defaults.get("Narrative","")) if defaults else "", height=300, key="w_narrative")
 
+    # Personnel picker (from live app roster by default)
     with st.container(border=True):
         st.subheader("All Members on Scene")
-        roster_people = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA)
-        name_series = build_person_name_series(roster_people)
-        if len(name_series) == 0:
-            st.warning("No personnel names found in the roster. Expected columns: **Name**, **FullName**, or **FirstName + LastName**. Check **Rosters → Personnel**.")
-            st.caption(f"Available columns: {list(roster_people.columns)}  | Rows: {len(roster_people)}")
-        picked_people = st.multiselect("Pick members", options=name_series.tolist(), key="w_pick_people")
+        roster_people = ensure_columns(get_roster("Personnel"), PERSONNEL_SCHEMA)
+        # Build name list
+        if "Name" in roster_people.columns and roster_people["Name"].notna().any():
+            names = roster_people["Name"].astype(str)
+        elif "FullName" in roster_people.columns and roster_people["FullName"].notna().any():
+            names = roster_people["FullName"].astype(str)
+        elif all(c in roster_people.columns for c in ["FirstName","LastName"]):
+            names = (roster_people["FirstName"].fillna("").astype(str).str.strip() + " " + roster_people["LastName"].fillna("").astype(str).str.strip()).str.strip()
+        else:
+            names = pd.Series([], dtype=str)
+        if "Active" in roster_people.columns and st.session_state.get("filter_active_only", True):
+            mask = roster_people["Active"].astype(str).str.lower().isin(["yes","true","1","active"])
+            names = names[mask]
+        name_opts = sorted(set(names.dropna().map(lambda s: s.strip()).replace("", pd.NA).dropna().unique().tolist()))
+        if len(name_opts) == 0:
+            st.warning("No personnel names found in the live roster. Go to **Rosters → Personnel**, add rows, and they appear here immediately.")
+            st.caption(f"Detected columns: {list(roster_people.columns)} | Rows: {len(roster_people)}")
+        picked_people = st.multiselect("Pick members", options=name_opts, key="w_pick_people")
         roles = get_lookups(data).get("Role", ["OIC","Driver","Firefighter"])
         c = st.columns(3)
         role_default = c[0].selectbox("Default Role", options=roles, index=0 if roles else None, key="w_role_default")
@@ -290,14 +292,22 @@ with tabs[0]:
         st.write(f"**Total Personnel on Scene:** {len(cur_view) if not cur_view.empty else 0}")
         st.dataframe(cur_view, use_container_width=True, hide_index=True)
 
+    # Apparatus picker (from live app roster by default)
     with st.container(border=True):
         st.subheader("Apparatus on Scene")
-        roster_units = ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA)
-        unit_series = build_unit_label_series(roster_units)
-        if len(unit_series) == 0:
-            st.warning("No apparatus found in the roster. Expected columns: **UnitNumber**, **CallSign**, or **Name**. Check **Rosters → Apparatus**.")
-            st.caption(f"Available columns: {list(roster_units.columns)}  | Rows: {len(roster_units)}")
-        picked_units = st.multiselect("Pick apparatus units", options=unit_series.tolist(), key="w_pick_units")
+        roster_units = ensure_columns(get_roster("Apparatus"), APPARATUS_SCHEMA)
+        label = None
+        for col in ["UnitNumber","CallSign","Name"]:
+            if col in roster_units.columns and roster_units[col].notna().any(): label = col; break
+        unit_series = roster_units[label].astype(str) if label else pd.Series([], dtype=str)
+        if "Active" in roster_units.columns and st.session_state.get("filter_active_only", True):
+            mask = roster_units["Active"].astype(str).str.lower().isin(["yes","true","1","active"])
+            unit_series = unit_series[mask]
+        unit_opts = sorted(set(unit_series.dropna().map(lambda s: s.strip()).replace("", pd.NA).dropna().unique().tolist()))
+        if len(unit_opts) == 0:
+            st.warning("No apparatus in the live roster. Go to **Rosters → Apparatus**, add rows, and they appear here immediately.")
+            st.caption(f"Detected columns: {list(roster_units.columns)} | Rows: {len(roster_units)}")
+        picked_units = st.multiselect("Pick apparatus units", options=unit_opts, key="w_pick_units")
         c = st.columns(3)
         unit_type = c[0].selectbox("UnitType", options=[""]+get_lookups(data).get("UnitType", []), index=0, key="w_unit_type")
         unit_role = c[1].selectbox("Role", options=["Primary","Support","Water Supply","Staging"], index=0, key="w_unit_role")
@@ -313,6 +323,20 @@ with tabs[0]:
         cur_app_view = cur_app[cur_app[PRIMARY_KEY].astype(str) == str(inc_num)]
         st.write(f"**Total Apparatus on Scene:** {len(cur_app_view) if not cur_app_view.empty else 0}")
         st.dataframe(cur_app_view, use_container_width=True, hide_index=True)
+
+    # Times + Save/Submit
+    with st.container(border=True):
+        st.subheader("Times (optional)")
+        c = st.columns(4)
+        alarm = c[0].text_input("Alarm (HH:MM)", key="w_alarm_time")
+        enroute = c[1].text_input("Enroute (HH:MM)", key="w_enroute_time")
+        arrival = c[2].text_input("Arrival (HH:MM)", key="w_arrival_time")
+        clear = c[3].text_input("Clear (HH:MM)", key="w_clear_time")
+        if st.button("Save Times", key="w_save_times"):
+            times = data["Incident_Times"]
+            new = {PRIMARY_KEY: inc_num, "Alarm": alarm, "Enroute": enroute, "Arrival": arrival, "Clear": clear}
+            data["Incident_Times"] = upsert_row(times, new, key=PRIMARY_KEY)
+            autosave_if_enabled(data, file_path); st.success("Times saved.")
 
     row_vals = {
         PRIMARY_KEY: inc_num,
@@ -340,8 +364,12 @@ with tabs[0]:
         data["Incidents"] = upsert_row(data["Incidents"], row_vals, key=PRIMARY_KEY)
         autosave_if_enabled(data, file_path); st.success("Submitted for review.")
     if selected and actions[2].button("Open Printable", key="w_open_print"):
-        with st.expander("Printable Report", expanded=True): printable_incident(data, selected)
+        with st.expander("Printable Report", expanded=True):
+            st.header(f"Incident Report — #{selected}")
+            # simple printable
+            st.json(row_vals)
 
+# ---- Review Queue
 with tabs[1]:
     st.header("Review Queue")
     pending = data["Incidents"][data["Incidents"]["Status"].astype(str) == "Submitted"]
@@ -350,34 +378,39 @@ with tabs[1]:
     if not pending.empty:
         sel = st.selectbox("Pick an Incident to review", options=pending[PRIMARY_KEY].astype(str).tolist(), index=None, placeholder="Choose...", key="pick_review_queue")
     if sel:
-        with st.expander("Printable View", expanded=True): printable_incident(data, sel)
+        st.subheader("Printable View")
+        # reuse a quick printable
+        rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
+        st.json(rec)
         comments = st.text_area("Reviewer Comments", key="rev_comments_queue")
         c = st.columns(3)
         if c[0].button("Approve", key="btn_approve_queue"):
-            row = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
-            row["Status"] = "Approved"; row["ReviewedBy"] = user["username"]; row["ReviewedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M"); row["ReviewerComments"] = comments
+            row = rec; row["Status"] = "Approved"; row["ReviewedBy"] = user["username"]; row["ReviewedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M"); row["ReviewerComments"] = comments
             data["Incidents"] = upsert_row(data["Incidents"], row, key=PRIMARY_KEY); autosave_if_enabled(data, file_path); st.success("Approved.")
         if c[1].button("Reject", key="btn_reject_queue"):
-            row = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
-            row["Status"] = "Rejected"; row["ReviewedBy"] = user["username"]; row["ReviewedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M"); row["ReviewerComments"] = comments or "Please revise."
+            row = rec; row["Status"] = "Rejected"; row["ReviewedBy"] = user["username"]; row["ReviewedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M"); row["ReviewerComments"] = comments or "Please revise."
             data["Incidents"] = upsert_row(data["Incidents"], row, key=PRIMARY_KEY); autosave_if_enabled(data, file_path); st.warning("Rejected.")
         if c[2].button("Send back to Draft", key="btn_backtodraft_queue"):
-            row = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
-            row["Status"] = "Draft"; row["ReviewerComments"] = comments
+            row = rec; row["Status"] = "Draft"; row["ReviewerComments"] = comments
             data["Incidents"] = upsert_row(data["Incidents"], row, key=PRIMARY_KEY); autosave_if_enabled(data, file_path); st.info("Moved back to Draft.")
 
+# ---- Rosters
 with tabs[2]:
     st.header("Rosters")
-    st.caption("Tip: **Active** column = Yes/True/1 to appear in pick lists (toggle in sidebar to include inactive).")
-    personnel = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA)
-    personnel_edit = st.data_editor(personnel, num_rows="dynamic", use_container_width=True, key="editor_personnel_roster")
-    if st.button("Save Personnel Roster", key="save_personnel_roster"):
-        data["Personnel"] = personnel_edit; autosave_if_enabled(data, file_path); st.success("Personnel roster saved.")
-    apparatus = ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA)
-    apparatus_edit = st.data_editor(apparatus, num_rows="dynamic", use_container_width=True, key="editor_apparatus_roster")
-    if st.button("Save Apparatus Roster", key="save_apparatus_roster"):
-        data["Apparatus"] = apparatus_edit; autosave_if_enabled(data, file_path); st.success("Apparatus roster saved.")
+    st.caption("Edits update the in‑app roster immediately; click Save to write to Excel. The **Write Report** pickers use the in‑app roster when 'Roster source' = app.")
+    # Personnel
+    personnel = ensure_columns(st.session_state["roster_personnel"], PERSONNEL_SCHEMA)
+    st.session_state["roster_personnel"] = st.data_editor(personnel, num_rows="dynamic", use_container_width=True, key="editor_personnel_roster")
+    c = st.columns(2)
+    if c[0].button("Save Personnel Roster to Excel", key="save_personnel_roster"):
+        data["Personnel"] = ensure_columns(st.session_state["roster_personnel"], PERSONNEL_SCHEMA); autosave_if_enabled(data, file_path); st.success("Personnel roster saved to Excel.")
+    # Apparatus
+    apparatus = ensure_columns(st.session_state["roster_apparatus"], APPARATUS_SCHEMA)
+    st.session_state["roster_apparatus"] = st.data_editor(apparatus, num_rows="dynamic", use_container_width=True, key="editor_apparatus_roster")
+    if c[1].button("Save Apparatus Roster to Excel", key="save_apparatus_roster"):
+        data["Apparatus"] = ensure_columns(st.session_state["roster_apparatus"], APPARATUS_SCHEMA); autosave_if_enabled(data, file_path); st.success("Apparatus roster saved to Excel.")
 
+# ---- Print
 with tabs[3]:
     st.header("Print")
     status = st.selectbox("Filter by Status", options=["","Approved","Submitted","Draft","Rejected"], key="print_status_center")
@@ -388,9 +421,10 @@ with tabs[3]:
     if not base.empty:
         sel = st.selectbox("Pick an Incident", options=base[PRIMARY_KEY].astype(str).tolist(), index=None, key="print_pick_center")
     if sel:
-        with st.expander("Printable Report", expanded=True): printable_incident(data, sel)
-        st.info("Use your browser print dialog for a clean paper copy.")
+        rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
+        st.json(rec)
 
+# ---- Export
 with tabs[4]:
     st.header("Export")
     if st.button("Build Excel for Download", key="btn_build_export"):
