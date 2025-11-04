@@ -98,7 +98,6 @@ def name_rank_first_last(row: pd.Series) -> str:
     return " ".join(parts).strip()
 
 def build_person_options(df: pd.DataFrame) -> list:
-    # Prefer Name/FullName; else synthesize Rank First Last
     if "Name" in df and df["Name"].notna().any():
         s = df["Name"].astype(str)
     elif "FullName" in df and df["FullName"].notna().any():
@@ -122,7 +121,6 @@ def build_unit_options(df: pd.DataFrame) -> list:
     return sorted(set(vals))
 
 def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
-    # Personnel
     p = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA).copy()
     if not p.empty:
         mask_name_blank = p["Name"].isna() | (p["Name"].astype(str).str.strip()=="")
@@ -135,7 +133,6 @@ def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
         else:
             p["Active"] = "Yes"
     data["Personnel"] = p
-    # Apparatus
     a = ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA).copy()
     if not a.empty:
         if "Active" in a.columns:
@@ -147,7 +144,7 @@ def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     return data
 
 # ---------------- Sidebar / Load ----------------
-st.sidebar.title("📝 Fire Incident Reports — v4.2.7 (Auth)")
+st.sidebar.title("📝 Fire Incident Reports — v4.2.8 (Auth)")
 file_path = st.sidebar.text_input("Excel path", value=DEFAULT_FILE, key="path_input_auth")
 uploaded = st.sidebar.file_uploader("Upload/replace workbook (.xlsx)", type=["xlsx"], key="upload_auth")
 if uploaded:
@@ -213,7 +210,8 @@ st.sidebar.write(f"**Logged in as:** {user['name']}  \nRole: {user['role']}")
 sign_out_button()
 
 # ---------------- Tabs ----------------
-tabs = st.tabs(["Write Report","Review Queue","Rosters","Print","Export","Diagnostics"])
+# New tabs: Rejected & Admin (User Management)
+tabs = st.tabs(["Write Report","Review Queue","Rejected","Rosters","Print","Export","Admin","Diagnostics"])
 
 # ---- Write Report
 with tabs[0]:
@@ -375,7 +373,12 @@ with tabs[1]:
         sel = st.selectbox("Pick an Incident to review", options=pending[PRIMARY_KEY].astype(str).tolist(), index=None, placeholder="Choose...", key="pick_review_queue_auth")
     if sel:
         rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
-        st.json(rec, expanded=False)
+        # Friendly view with narrative
+        st.subheader(f"Incident {sel}")
+        st.write(f"**Type:** {rec.get('IncidentType','')}  |  **Priority:** {rec.get('ResponsePriority','')}  |  **Alarm:** {rec.get('AlarmLevel','')}")
+        st.write(f"**Location:** {rec.get('Address','')} {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}")
+        st.write("**Narrative:**")
+        st.text_area("Narrative (read-only)", value=str(rec.get("Narrative","")), height=240, key="narrative_readonly_review", disabled=True)
         comments = st.text_area("Reviewer Comments", key="rev_comments_queue_auth")
         c = st.columns(3)
         if user["role"] in ["Admin","Reviewer"]:
@@ -400,8 +403,34 @@ with tabs[1]:
         else:
             st.info("You must be Reviewer/Admin to approve/reject.")
 
-# ---- Rosters
+# ---- Rejected Queue (new)
 with tabs[2]:
+    st.header("Rejected Reports")
+    if user["role"] in ["Admin","Reviewer"]:
+        rejected = data["Incidents"][data["Incidents"]["Status"].astype(str) == "Rejected"]
+    else:
+        # Members see only their own rejected
+        rejected = data["Incidents"][(data["Incidents"]["Status"].astype(str) == "Rejected") & (data["Incidents"]["CreatedBy"].astype(str) == user["username"])]
+    st.dataframe(rejected, use_container_width=True, hide_index=True, key="grid_rejected_auth")
+    selr = None
+    if not rejected.empty:
+        selr = st.selectbox("Pick a Rejected Incident", options=rejected[PRIMARY_KEY].astype(str).tolist(), index=None, placeholder="Choose...", key="pick_rejected_auth")
+    if selr:
+        rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == selr].iloc[0].to_dict()
+        st.subheader(f"Incident {selr} — Reviewer Comments")
+        st.text_area("Reviewer Comments (read-only)", value=str(rec.get("ReviewerComments","")), height=140, key="rejected_comments_readonly", disabled=True)
+        st.write("**Narrative (read-only):**")
+        st.text_area("Narrative", value=str(rec.get("Narrative","")), height=240, key="rejected_narrative_readonly", disabled=True)
+        c = st.columns(2)
+        if c[0].button("Move back to Draft to Edit", key="btn_rejected_to_draft"):
+            rec["Status"] = "Draft"
+            data["Incidents"] = upsert_row(data["Incidents"], rec, key=PRIMARY_KEY)
+            if st.session_state.get("autosave", True):
+                save_to_path(data, file_path)
+            st.success("Moved to Draft. Go to Write Report → Edit to revise and resubmit.")
+
+# ---- Rosters
+with tabs[3]:
     st.header("Rosters")
     st.caption("Edit, then click Save to write changes into the Excel workbook. Use 'Repair roster now' if names are blank.")
     personnel = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA)
@@ -424,7 +453,7 @@ with tabs[2]:
         else: st.error(err)
 
 # ---- Print
-with tabs[3]:
+with tabs[4]:
     st.header("Print")
     status = st.selectbox("Filter by Status", options=["","Approved","Submitted","Draft","Rejected"], key="print_status_auth")
     base = data["Incidents"].copy()
@@ -438,7 +467,7 @@ with tabs[3]:
         st.json(rec, expanded=False)
 
 # ---- Export
-with tabs[4]:
+with tabs[5]:
     st.header("Export")
     if st.button("Build Excel for Download", key="btn_build_export_auth"):
         payload = save_workbook_to_bytes(data)
@@ -448,8 +477,38 @@ with tabs[4]:
         if ok: st.success(f"Wrote: {file_path}")
         else: st.error(f"Failed: {err}")
 
+# ---- Admin (User Management)
+with tabs[6]:
+    st.header("Admin — User Management")
+    if user["role"] != "Admin":
+        st.info("Admin only.")
+    else:
+        st.caption("Add/edit users. 'Active' must be Yes/True/1 to allow sign-in.")
+        users_df = ensure_columns(data.get("Users", pd.DataFrame()), USERS_SCHEMA)
+        users_edit = st.data_editor(users_df, num_rows="dynamic", use_container_width=True, key="editor_users_auth")
+        c = st.columns(3)
+        if c[0].button("Save Users to Excel", key="save_users_auth"):
+            # Basic sanity: ensure required cols
+            users_edit = ensure_columns(users_edit, USERS_SCHEMA)
+            ok, err = save_to_path({**data, "Users": users_edit}, file_path)
+            if ok:
+                data["Users"] = users_edit
+                st.success("Users saved.")
+            else:
+                st.error(err)
+        if c[1].button("Add Reviewer Template Row", key="add_reviewer_template"):
+            templ = {"Username":"reviewer2","Password":"changeme","Role":"Reviewer","FullName":"New Reviewer","Active":"Yes"}
+            users_edit = pd.concat([users_edit, pd.DataFrame([templ])], ignore_index=True)
+            st.session_state["editor_users_auth"] = users_edit
+            st.info("Template row added. Edit then Save Users to Excel.")
+        if c[2].button("Add Member Template Row", key="add_member_template"):
+            templ = {"Username":"member2","Password":"changeme","Role":"Member","FullName":"New Member","Active":"Yes"}
+            users_edit = pd.concat([users_edit, pd.DataFrame([templ])], ignore_index=True)
+            st.session_state["editor_users_auth"] = users_edit
+            st.info("Template row added. Edit then Save Users to Excel.")
+
 # ---- Diagnostics
-with tabs[5]:
+with tabs[7]:
     st.header("Diagnostics")
     st.write(f"**App dir:** {os.path.dirname(__file__)}")
     st.write(f"**Excel path:** {file_path}  |  Exists: {'✅' if os.path.exists(file_path) else '❌'}")
@@ -461,3 +520,5 @@ with tabs[5]:
     st.dataframe(data['Personnel'].head(10), use_container_width=True)
     st.write("**Apparatus Top 10:**")
     st.dataframe(data['Apparatus'].head(10), use_container_width=True)
+    st.write("**Users Top 10:**")
+    st.dataframe(data['Users'].head(10), use_container_width=True)
