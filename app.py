@@ -1,15 +1,23 @@
+#!/usr/bin/env python3
+# Unified Fire Incident Reports App — v4.3.2 (single file)
+# Combines your current app plus the print + PDF + apparatus patches.
+# - CallSign-first apparatus picker
+# - Print tab: full details + Print button + Convert to PDF / HTML fallback
+# - Keeps your sign-in, roles, rosters, review/approve flows intact
 
 import os, io
 from datetime import datetime, date
-from typing import Dict, List
+from typing import Dict, List, Optional
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Fire Incident Reports", page_icon="📝", layout="wide")
 
 DEFAULT_FILE = os.path.join(os.path.dirname(__file__), "fire_incident_db.xlsx")
 PRIMARY_KEY = "IncidentNumber"
 
+# ---------- Schemas & Lookups ----------
 CHILD_TABLES = {
     "Incident_Times": ["IncidentNumber","Alarm","Enroute","Arrival","Clear"],
     "Incident_Personnel": ["IncidentNumber","Name","Role","Hours","RespondedIn"],
@@ -37,6 +45,7 @@ ROLE_PRESETS = {
     "Member":  {"CanWrite":True,"CanEditOwn":True,"CanEditAll":False,"CanReview":False,"CanApprove":False,"CanManageUsers":False,"CanEditRosters":False,"CanPrint":True},
 }
 
+# ---------- IO helpers ----------
 def load_workbook(path: str) -> Dict[str, pd.DataFrame]:
     try:
         xls = pd.ExcelFile(path)
@@ -62,6 +71,7 @@ def save_to_path(dfs: Dict[str, pd.DataFrame], path: str):
     except Exception as e:
         return False, str(e)
 
+# ---------- Table utilities ----------
 def ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     if df is None:
         df = pd.DataFrame()
@@ -97,6 +107,7 @@ def upsert_row(df: pd.DataFrame, row: dict, key=PRIMARY_KEY) -> pd.DataFrame:
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     return df
 
+# ---------- Roster helpers (personnel + apparatus) ----------
 def _name_rank_first_last(row: pd.Series) -> str:
     fn = str(row.get("FirstName") or "").strip()
     ln = str(row.get("LastName") or "").strip()
@@ -118,19 +129,44 @@ def build_person_options(df: pd.DataFrame) -> list:
     vals = s.dropna().map(lambda x: x.strip()).replace("", pd.NA).dropna().unique().tolist()
     return sorted(set(vals))
 
+# CallSign-first (case-insensitive) for apparatus options, falls back to common alternates
 def build_unit_options(df: pd.DataFrame) -> list:
-    for col in ["UnitNumber","CallSign","Name"]:
-        if col in df.columns and df[col].notna().any():
-            s = df[col].astype(str); break
-    else:
-        s = pd.Series([], dtype=str)
-    vals = s.dropna().map(lambda x: x.strip()).replace("", pd.NA).dropna().unique().tolist()
+    if df is None or df.empty:
+        return []
+    dd = df.copy()
+    dd.columns = [str(c).strip() for c in dd.columns]
+    # Prefer Active=Yes if present
+    try:
+        if "Active" in dd.columns:
+            m = dd["Active"].astype(str).str.lower().isin(["yes","true","1"])
+            dd_use = dd[m] if m.any() else dd
+        else:
+            dd_use = dd
+    except Exception:
+        dd_use = dd
+    def pick(colnames: List[str]):
+        norm = {str(c).strip().lower(): c for c in dd_use.columns}
+        for name in colnames:
+            if name in norm and dd_use[norm[name]].notna().any():
+                return dd_use[norm[name]].astype(str).str.strip()
+        return None
+    priority = ["callsign","call sign","unitnumber","unit","unit #","unit_number","name","apparatus","truck"]
+    buckets = []
+    s = pick(priority)
+    if s is not None: buckets.append(s)
+    for alt in ["unitnumber","unit","unit #","unit_number","call sign","name","apparatus","truck"]:
+        ss = pick([alt])
+        if ss is not None: buckets.append(ss)
+    if not buckets:
+        return []
+    s_all = pd.concat(buckets, ignore_index=True)
+    vals = (s_all.dropna().map(lambda x: x.strip()).replace("", pd.NA).dropna().unique().tolist())
     return sorted(set(vals))
 
 def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     p = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA).copy()
     if "Rank" in p.columns and not p.empty:
-        p["Rank"] = p["Rank"].astype(str)  # free-text ranks
+        p["Rank"] = p["Rank"].astype(str)  # free-text ranks allowed
     if not p.empty:
         mask_name_blank = p["Name"].isna() | (p["Name"].astype(str).str.strip()=="")
         p.loc[mask_name_blank, "Name"] = p.loc[mask_name_blank].apply(_name_rank_first_last, axis=1)
@@ -153,6 +189,7 @@ def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     data["Apparatus"] = a
     return data
 
+# ---------- Auth / permissions ----------
 def _coerce_bool(x):
     s = str(x).strip().lower()
     return s in ("1","true","yes","y")
@@ -173,6 +210,7 @@ def apply_role_presets(df: pd.DataFrame) -> pd.DataFrame:
 def can(user_row: dict, perm: str) -> bool:
     return _coerce_bool(user_row.get(perm, False))
 
+# ---------- Sign-in UI ----------
 st.sidebar.title("📝 Fire Incident Reports — v4.3.2")
 file_path = st.sidebar.text_input("Excel path", value=DEFAULT_FILE, key="path_input_auth")
 uploaded = st.sidebar.file_uploader("Upload/replace workbook (.xlsx)", type=["xlsx"], key="upload_auth")
@@ -190,15 +228,20 @@ else:
     st.info("Upload or point to your Excel workbook to begin.")
     st.stop()
 
+# Base tables
 ensure_table(data, "Incidents", [
     PRIMARY_KEY,"IncidentDate","IncidentTime","IncidentType","ResponsePriority","AlarmLevel","Shift",
     "LocationName","Address","City","State","PostalCode","Latitude","Longitude",
-    "Narrative","Status","CreatedBy","SubmittedAt","ReviewedBy","ReviewedAt","ReviewerComments"
+    "Narrative","Status","CreatedBy","SubmittedAt","ReviewedBy","ReviewedAt","ReviewerComments",
+    # extras for print (safe if unused)
+    "CallerName","CallerPhone","ReportWriter","Approver"
 ])
 ensure_table(data, "Personnel", PERSONNEL_SCHEMA)
 ensure_table(data, "Apparatus", APPARATUS_SCHEMA)
-for t, cols in CHILD_TABLES.items(): ensure_table(data, t, cols)
+for t, cols in CHILD_TABLES.items():
+    ensure_table(data, t, cols)
 
+# Users sheet with defaults
 users = ensure_columns(data.get("Users", pd.DataFrame()), USERS_SCHEMA)
 if users.empty or "Username" not in users.columns or users["Username"].isna().all():
     users = pd.DataFrame([
@@ -226,6 +269,7 @@ def sign_out_button():
     if st.button("Sign Out", key="btn_logout_auth"):
         st.session_state.pop("user", None); st.experimental_rerun()
 
+# Prepare data & lookups
 data = repair_rosters(data)
 lookups = get_lookups(data)
 
@@ -235,6 +279,289 @@ user = st.session_state["user"]
 st.sidebar.write(f"**Logged in as:** {user.get('FullName', user.get('Username',''))}  \\nRole: {user.get('Role','')}")
 sign_out_button()
 
+# ---------- Print/Review renderers + PDF export (inline) ----------
+def render_incident_block(data: Dict[str, pd.DataFrame], sel):
+    rec_df = data.get("Incidents", pd.DataFrame())
+    if rec_df.empty:
+        st.warning("Incidents table empty."); return
+    rec = rec_df[rec_df[PRIMARY_KEY].astype(str) == str(sel)]
+    if rec.empty:
+        st.warning("Incident not found."); return
+    rec = rec.iloc[0].to_dict()
+
+    # Times
+    times_df = ensure_columns(data.get("Incident_Times", pd.DataFrame()), ["IncidentNumber","Alarm","Enroute","Arrival","Clear"])
+    times_row = {}
+    if not times_df.empty:
+        m = times_df[PRIMARY_KEY].astype(str) == str(sel)
+        if m.any():
+            times_row = times_df[m].iloc[0].to_dict()
+
+    st.subheader(f"Incident {sel}")
+    st.write(
+        f"**Type:** {rec.get('IncidentType','')}  |  "
+        f"**Priority:** {rec.get('ResponsePriority','')}  |  "
+        f"**Alarm Level:** {rec.get('AlarmLevel','')}"
+    )
+    st.write(f"**Date:** {rec.get('IncidentDate','')}  **Time:** {rec.get('IncidentTime','')}")
+    st.write(
+        f"**Location:** {rec.get('LocationName','')} — "
+        f"{rec.get('Address','')} {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}"
+    )
+
+    caller_name  = rec.get('CallerName','')
+    caller_phone = rec.get('CallerPhone','')
+    writer_name  = rec.get('ReportWriter','') or rec.get('CreatedBy','')
+    approver     = rec.get('Approver','') or rec.get('ReviewedBy','')
+    st.write(
+        f"**Caller:** {caller_name if caller_name else '_N/A_'}  |  "
+        f"**Caller Phone:** {caller_phone if caller_phone else '_N/A_'}"
+    )
+    st.write(
+        f"**Report Written By:** {writer_name if writer_name else '_N/A_'}  |  "
+        f"**Approved By:** {approver if approver else '_N/A_'}"
+        f"{' — at ' + str(rec.get('ReviewedAt')) if rec.get('ReviewedAt') else ''}"
+    )
+
+    st.write(
+        f"**Times —** "
+        f"Alarm: {times_row.get('Alarm','')}  |  "
+        f"Enroute: {times_row.get('Enroute','')}  |  "
+        f"Arrival: {times_row.get('Arrival','')}  |  "
+        f"Clear: {times_row.get('Clear','')}"
+    )
+
+    st.write("**Narrative:**")
+    st.text_area("Narrative (read-only)",
+                 value=str(rec.get("Narrative","")),
+                 height=220,
+                 key=f"narrative_readonly_{sel}",
+                 disabled=True)
+
+    ip = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), ["IncidentNumber","Name","Role","Hours","RespondedIn"])
+    ia = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), ["IncidentNumber","Unit","UnitType","Role","Actions"])
+    ip_view = ip[ip[PRIMARY_KEY].astype(str) == str(sel)]
+    ia_view = ia[ia[PRIMARY_KEY].astype(str) == str(sel)]
+
+    st.markdown(f"**Personnel on Scene ({len(ip_view)}):**")
+    person_cols = [c for c in ["Name","Role","Hours","RespondedIn"] if c in ip_view.columns]
+    st.dataframe(ip_view[person_cols] if not ip_view.empty else ip_view, use_container_width=True, hide_index=True, key=f"grid_print_personnel_{sel}")
+
+    st.markdown(f"**Apparatus on Scene ({len(ia_view)}):**")
+    app_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
+    st.dataframe(ia_view[app_cols] if not ia_view.empty else ia_view, use_container_width=True, hide_index=True, key=f"grid_print_apparatus_{sel}")
+
+    # minimal print stylesheet so Streamlit chrome hides during print
+    components.html(\"\"\"
+    <style>
+    @media print {
+      header, footer, [data-testid="stSidebar"], .stButton, .stTextInput, .stSlider, .stSelectbox { display: none !important; }
+      .block-container { padding: 0 !important; }
+    }
+    </style>
+    \"\"\", height=0, width=0)
+
+def render_print_button(label: str = "🖨️ Print Report"):
+    if st.button(label, key="btn_print_report_unified"):
+        components.html("<script>window.print()</script>", height=0, width=0)
+
+# ----- PDF export (reportlab optional; HTML fallback) -----
+try:
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import inch
+    REPORTLAB_OK = True
+except Exception:
+    REPORTLAB_OK = False
+
+def _wrap_lines(text: str, max_chars: int) -> list:
+    if not text:
+        return []
+    from textwrap import wrap
+    return wrap(str(text), max_chars)
+
+def _draw_wrapped(c, text: str, x: float, y: float, max_chars: int, leading: float):
+    for line in _wrap_lines(text, max_chars):
+        c.drawString(x, y, line)
+        y -= leading
+        if y < 72:  # 1 inch bottom margin
+            c.showPage()
+            y = 720
+    return y
+
+def _draw_table(c, headers, rows, x, y, col_widths, leading):
+    c.setFont("Helvetica", 10)
+    y -= leading
+    for i, h in enumerate(headers):
+        c.drawString(x + sum(col_widths[:i]), y, str(h))
+    y -= leading * 0.5
+    c.line(x, y, x + sum(col_widths), y)
+    y -= leading
+    for row in rows:
+        for i, cell in enumerate(row):
+            c.drawString(x + sum(col_widths[:i]), y, str(cell) if cell is not None else "")
+        y -= leading
+        if y < 72:
+            c.showPage()
+            y = 720
+    return y
+
+def _generate_pdf_bytes(incident, ip_view, ia_view, times_row, incident_id):
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=LETTER)
+    width, height = LETTER
+    left = 0.75 * inch
+    y = height - 0.75 * inch
+
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(left, y, f"Incident Report — {incident_id}")
+    y -= 18
+    c.setFont("Helvetica", 9)
+    c.drawString(left, y, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    y -= 10
+
+    c.setFont("Helvetica", 10)
+    y -= 4
+    y = _draw_wrapped(c, f"Type: {incident.get('IncidentType','')}  |  Priority: {incident.get('ResponsePriority','')}  |  Alarm Level: {incident.get('AlarmLevel','')}", left, y, 110, 12)
+    y = _draw_wrapped(c, f"Date: {incident.get('IncidentDate','')}    Time: {incident.get('IncidentTime','')}", left, y, 110, 12)
+    loc = f"{incident.get('LocationName','')} — {incident.get('Address','')} {incident.get('City','')} {incident.get('State','')} {incident.get('PostalCode','')}"
+    y = _draw_wrapped(c, f"Location: {loc}", left, y, 110, 12)
+    caller = f"Caller: {incident.get('CallerName','') or 'N/A'}   |   Caller Phone: {incident.get('CallerPhone','') or 'N/A'}"
+    y = _draw_wrapped(c, caller, left, y, 110, 12)
+    writer = f"Report Written By: {incident.get('ReportWriter','') or incident.get('CreatedBy','') or 'N/A'}"
+    approver = f"Approved By: {incident.get('Approver','') or incident.get('ReviewedBy','') or 'N/A'}"
+    y = _draw_wrapped(c, f"{writer}   |   {approver}", left, y, 110, 12)
+    times_line = f"Times — Alarm: {times_row.get('Alarm','')}  |  Enroute: {times_row.get('Enroute','')}  |  Arrival: {times_row.get('Arrival','')}  |  Clear: {times_row.get('Clear','')}"
+    y = _draw_wrapped(c, times_line, left, y, 110, 12)
+
+    y -= 6
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Narrative")
+    y -= 14
+    c.setFont("Helvetica", 10)
+    y = _draw_wrapped(c, incident.get("Narrative",""), left, y, 110, 12)
+
+    # Personnel table
+    y -= 10
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Personnel on Scene")
+    y -= 14
+    c.setFont("Helvetica", 10)
+    person_headers = ["Name","Role","Hours","RespondedIn"]
+    person_cols = [1.8*inch, 1.3*inch, 0.8*inch, 1.6*inch]
+    rows = []
+    if not ip_view.empty:
+        for _, r in ip_view.iterrows():
+            rows.append([r.get("Name",""), r.get("Role",""), r.get("Hours",""), r.get("RespondedIn","")])
+    y = _draw_table(c, person_headers, rows, left, y, person_cols, 12)
+
+    # Apparatus table
+    y -= 10
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Apparatus on Scene")
+    y -= 14
+    c.setFont("Helvetica", 10)
+    app_headers = ["Unit","UnitType","Role","Actions"]
+    app_cols = [1.2*inch, 1.2*inch, 1.2*inch, 2.7*inch]
+    arows = []
+    if not ia_view.empty:
+        for _, r in ia_view.iterrows():
+            arows.append([r.get("Unit",""), r.get("UnitType",""), r.get("Role",""), r.get("Actions","")])
+    y = _draw_table(c, app_headers, arows, left, y, app_cols, 12)
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+def _generate_html_bytes(incident, ip_view, ia_view, times_row, incident_id):
+    import html
+    def esc(s): return html.escape("" if s is None else str(s))
+    rows_person = ""
+    if not ip_view.empty:
+        for _, r in ip_view.iterrows():
+            rows_person += f"<tr><td>{esc(r.get('Name',''))}</td><td>{esc(r.get('Role',''))}</td><td>{esc(r.get('Hours',''))}</td><td>{esc(r.get('RespondedIn',''))}</td></tr>"
+    rows_app = ""
+    if not ia_view.empty:
+        for _, r in ia_view.iterrows():
+            rows_app += f"<tr><td>{esc(r.get('Unit',''))}</td><td>{esc(r.get('UnitType',''))}</td><td>{esc(r.get('Role',''))}</td><td>{esc(r.get('Actions',''))}</td></tr>"
+    html_doc = f"""<!doctype html>
+<html><head>
+<meta charset='utf-8'>
+<title>Incident {esc(incident_id)}</title>
+<style>
+  body {{ font-family: Arial, Helvetica, sans-serif; margin: 24px; }}
+  h1 {{ font-size: 18px; margin: 0 0 8px 0; }}
+  h2 {{ font-size: 16px; margin: 18px 0 6px; }}
+  .meta {{ margin: 6px 0; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ border: 1px solid #999; padding: 6px; font-size: 12px; vertical-align: top; }}
+  .muted {{ color: #666; }}
+  @media print {{ .noprint {{ display: none; }} }}
+</style>
+</head>
+<body>
+  <div class="noprint" style="text-align:right">
+    <button onclick="window.print()">Print</button>
+  </div>
+  <h1>Incident Report — {esc(incident_id)}</h1>
+  <div class="muted">Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+  <div class="meta"><b>Type:</b> {esc(incident.get('IncidentType',''))} &nbsp;&nbsp; <b>Priority:</b> {esc(incident.get('ResponsePriority',''))} &nbsp;&nbsp; <b>Alarm Level:</b> {esc(incident.get('AlarmLevel',''))}</div>
+  <div class="meta"><b>Date:</b> {esc(incident.get('IncidentDate',''))} &nbsp;&nbsp; <b>Time:</b> {esc(incident.get('IncidentTime',''))}</div>
+  <div class="meta"><b>Location:</b> {esc(incident.get('LocationName',''))} — {esc(incident.get('Address',''))} {esc(incident.get('City',''))} {esc(incident.get('State',''))} {esc(incident.get('PostalCode',''))}</div>
+  <div class="meta"><b>Caller:</b> {esc(incident.get('CallerName','') or 'N/A')} &nbsp;&nbsp; <b>Caller Phone:</b> {esc(incident.get('CallerPhone','') or 'N/A')}</div>
+  <div class="meta"><b>Report Written By:</b> {esc(incident.get('ReportWriter','') or incident.get('CreatedBy','') or 'N/A')} &nbsp;&nbsp; <b>Approved By:</b> {esc(incident.get('Approver','') or incident.get('ReviewedBy','') or 'N/A')}</div>
+  <div class="meta"><b>Times —</b> Alarm: {esc(times_row.get('Alarm',''))} &nbsp; | &nbsp; Enroute: {esc(times_row.get('Enroute',''))} &nbsp; | &nbsp; Arrival: {esc(times_row.get('Arrival',''))} &nbsp; | &nbsp; Clear: {esc(times_row.get('Clear',''))}</div>
+
+  <h2>Narrative</h2>
+  <div style="white-space: pre-wrap; font-size: 13px;">{esc(incident.get('Narrative',''))}</div>
+
+  <h2>Personnel on Scene</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Role</th><th>Hours</th><th>Responded In</th></tr></thead>
+    <tbody>{rows_person}</tbody>
+  </table>
+
+  <h2>Apparatus on Scene</h2>
+  <table>
+    <thead><tr><th>Unit</th><th>Unit Type</th><th>Role</th><th>Actions</th></tr></thead>
+    <tbody>{rows_app}</tbody>
+  </table>
+</body></html>"""
+    return html_doc.encode("utf-8")
+
+def render_incident_pdf_ui(data: Dict[str, pd.DataFrame], sel):
+    incident_df = data.get("Incidents", pd.DataFrame())
+    rec = incident_df[incident_df[PRIMARY_KEY].astype(str) == str(sel)]
+    if rec.empty:
+        st.warning("Incident not found."); return
+    incident = rec.iloc[0].to_dict()
+
+    times_df = ensure_columns(data.get("Incident_Times", pd.DataFrame()), ["IncidentNumber","Alarm","Enroute","Arrival","Clear"])
+    times_row = {}
+    if not times_df.empty:
+        m = times_df[PRIMARY_KEY].astype(str) == str(sel)
+        if m.any(): times_row = times_df[m].iloc[0].to_dict()
+
+    ip = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), ["IncidentNumber","Name","Role","Hours","RespondedIn"])
+    ia = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), ["IncidentNumber","Unit","UnitType","Role","Actions"])
+    ip_view = ip[ip[PRIMARY_KEY].astype(str) == str(sel)]
+    ia_view = ia[ia[PRIMARY_KEY].astype(str) == str(sel)]
+
+    st.subheader(f"Incident {sel} — Export")
+    col1, col2 = st.columns(2)
+
+    if REPORTLAB_OK and col1.button("📄 Convert to PDF", key=f"btn_pdf_{sel}"):
+        try:
+            pdf_bytes = _generate_pdf_bytes(incident, ip_view, ia_view, times_row, str(sel))
+            st.download_button("Download PDF", data=pdf_bytes, file_name=f"incident_{sel}.pdf", mime="application/pdf", key=f"dl_pdf_{sel}")
+        except Exception as e:
+            st.error(f"PDF generation failed: {e}")
+
+    if col2.button("⬇️ Download HTML (print to PDF)", key=f"btn_html_{sel}"):
+        html_bytes = _generate_html_bytes(incident, ip_view, ia_view, times_row, str(sel))
+        st.download_button("Download HTML", data=html_bytes, file_name=f"incident_{sel}.html", mime="text/html", key=f"dl_html_{sel}")
+
+# ---------- Tabs ----------
 tabs = st.tabs(["Write Report","Review Queue","Rejected","Approved","Rosters","Print","Export","Admin","Diagnostics"])
 
 with tabs[0]:
@@ -254,7 +581,7 @@ with tabs[0]:
         elif can(user,"CanEditOwn"):
             options_df = master[master["CreatedBy"].astype(str) == user.get("Username")]
         else:
-            options_df = master.iloc(0,0)
+            options_df = master.iloc[0:0]
         options = options_df[PRIMARY_KEY].dropna().astype(str).tolist() if PRIMARY_KEY in options_df.columns else []
         kwargs = {"options": options, "placeholder": "Choose...", "key": "pick_edit_write_auth"}
         if preselect and preselect in options:
@@ -444,12 +771,7 @@ with tabs[1]:
     if not pending.empty:
         sel = st.selectbox("Pick an Incident to review", options=pending[PRIMARY_KEY].astype(str).tolist(), index=None, placeholder="Choose...", key="pick_review_queue_auth")
     if sel:
-        rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
-        st.subheader(f"Incident {sel}")
-        st.write(f"**Type:** {rec.get('IncidentType','')}  |  **Priority:** {rec.get('ResponsePriority','')}  |  **Alarm:** {rec.get('AlarmLevel','')}")
-        st.write(f"**Location:** {rec.get('Address','')} {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}")
-        st.write("**Narrative:**")
-        st.text_area("Narrative (read-only)", value=str(rec.get("Narrative","")), height=240, key="narrative_readonly_review", disabled=True)
+        render_incident_block(data, sel)
         comments = st.text_area("Reviewer Comments", key="rev_comments_queue_auth")
         c = st.columns(3)
         if can(user,"CanReview"):
@@ -457,18 +779,28 @@ with tabs[1]:
                 if not can(user,"CanApprove"):
                     st.error("No permission to approve.")
                 else:
-                    row = rec; row["Status"] = "Approved"; row["ReviewedBy"] = user.get("Username"); row["ReviewedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M"); row["ReviewerComments"] = comments
-                    data["Incidents"] = upsert_row(data["Incidents"], row, key=PRIMARY_KEY)
+                    rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
+                    rec["Status"] = "Approved"
+                    rec["ReviewedBy"] = user.get("Username")
+                    rec["ReviewedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    rec["ReviewerComments"] = comments
+                    data["Incidents"] = upsert_row(data["Incidents"], rec, key=PRIMARY_KEY)
                     if st.session_state.get("autosave", True): save_to_path(data, file_path)
                     st.success("Approved.")
             if c[1].button("Reject", key="btn_reject_queue_auth"):
-                row = rec; row["Status"] = "Rejected"; row["ReviewedBy"] = user.get("Username"); row["ReviewedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M"); row["ReviewerComments"] = comments or "Please revise."
-                data["Incidents"] = upsert_row(data["Incidents"], row, key=PRIMARY_KEY)
+                rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
+                rec["Status"] = "Rejected"
+                rec["ReviewedBy"] = user.get("Username")
+                rec["ReviewedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                rec["ReviewerComments"] = comments or "Please revise."
+                data["Incidents"] = upsert_row(data["Incidents"], rec, key=PRIMARY_KEY)
                 if st.session_state.get("autosave", True): save_to_path(data, file_path)
                 st.warning("Rejected.")
             if c[2].button("Send back to Draft", key="btn_backtodraft_queue_auth"):
-                row = rec; row["Status"] = "Draft"; row["ReviewerComments"] = comments
-                data["Incidents"] = upsert_row(data["Incidents"], row, key=PRIMARY_KEY)
+                rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
+                rec["Status"] = "Draft"
+                rec["ReviewerComments"] = comments
+                data["Incidents"] = upsert_row(data["Incidents"], rec, key=PRIMARY_KEY)
                 if st.session_state.get("autosave", True): save_to_path(data, file_path)
                 st.info("Moved back to Draft.")
 
@@ -488,7 +820,7 @@ with tabs[2]:
         st.text_area("Reviewer Comments (read-only)", value=str(rec.get("ReviewerComments","")), height=140, key="rejected_comments_readonly", disabled=True)
         st.write("**Narrative (read-only):**")
         st.text_area("Narrative", value=str(rec.get("Narrative","")), height=240, key="rejected_narrative_readonly", disabled=True)
-        c = st.columns(2)
+        c = st.columns(3)
         if c[0].button("Move back to Draft to Edit", key="btn_rejected_to_draft"):
             rec["Status"] = "Draft"
             data["Incidents"] = upsert_row(data["Incidents"], rec, key=PRIMARY_KEY)
@@ -496,6 +828,10 @@ with tabs[2]:
             st.session_state["edit_incident_preselect"] = str(selr)
             st.session_state["force_edit_mode"] = True
             st.success("Moved to Draft. Go to Write Report → Edit to revise and resubmit.")
+        with c[1]:
+            render_print_button("🖨️ Print This Report")
+        with c[2]:
+            render_incident_pdf_ui(data, selr)
 
 with tabs[3]:
     st.header("Approved Reports")
@@ -505,36 +841,16 @@ with tabs[3]:
     if not approved.empty:
         sela = st.selectbox("Pick an Approved Incident", options=approved[PRIMARY_KEY].astype(str).tolist(), index=None, placeholder="Choose...", key="pick_approved_auth")
     if sela:
-        rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sela].iloc[0].to_dict()
-        st.subheader(f"Incident {sela}")
-        st.write(f"**Type:** {rec.get('IncidentType','')}  |  **Priority:** {rec.get('ResponsePriority','')}  |  **Alarm:** {rec.get('AlarmLevel','')}")
-        st.write(f"**Date/Time:** {rec.get('IncidentDate','')} {rec.get('IncidentTime','')}")
-        st.write(f"**Location:** {rec.get('LocationName','')} — {rec.get('Address','')} {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}")
-        st.write(f"**Shift:** {rec.get('Shift','')}  |  **Reviewed By:** {rec.get('ReviewedBy','')} at {rec.get('ReviewedAt','')}")
-        st.write("**Narrative:**")
-        st.text_area("Narrative (read-only)", value=str(rec.get("Narrative","")), height=260, key="narrative_readonly_approved", disabled=True)
-
-        ip = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
-        ia = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
-        ip_view = ip[ip[PRIMARY_KEY].astype(str) == str(sela)]
-        ia_view = ia[ia[PRIMARY_KEY].astype(str) == str(sela)]
-        st.markdown(f"**Personnel on Scene ({len(ip_view)}):**")
-        if not ip_view.empty:
-            show_person_cols = [c for c in ["Name","Role","Hours","RespondedIn"] if c in ip_view.columns]
-            st.dataframe(ip_view[show_person_cols], use_container_width=True, hide_index=True, key="grid_approved_personnel")
-        else:
-            st.write("_None recorded._")
-        st.markdown(f"**Apparatus on Scene ({len(ia_view)}):**")
-        if not ia_view.empty:
-            show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
-            st.dataframe(ia_view[show_cols], use_container_width=True, hide_index=True, key="grid_approved_apparatus")
-        else:
-            st.write("_None recorded._")
+        render_incident_block(data, sela)
+        cc = st.columns(2)
+        with cc[0]:
+            render_print_button("🖨️ Print This Report")
+        with cc[1]:
+            render_incident_pdf_ui(data, sela)
 
 with tabs[4]:
     st.header("Rosters")
     st.caption("Edit, then click Save. Rank is free text (letters allowed).")
-    # Roster editing still permission-gated in earlier build; keep simple here:
     personnel = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA)
     if "Rank" in personnel.columns:
         personnel["Rank"] = personnel["Rank"].astype(str)
@@ -557,26 +873,16 @@ with tabs[5]:
     base = data["Incidents"].copy()
     if status: base = base[base["Status"].astype(str) == status]
     st.dataframe(base, use_container_width=True, hide_index=True, key="grid_print_auth")
-    sel = None
+    selp = None
     if not base.empty:
-        sel = st.selectbox("Pick an Incident", options=base[PRIMARY_KEY].astype(str).tolist(), index=None, key="print_pick_auth")
-    if sel:
-        rec = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) == sel].iloc[0].to_dict()
-        st.subheader(f"Incident {sel}")
-        st.write(f"**Type:** {rec.get('IncidentType','')}  |  **Priority:** {rec.get('ResponsePriority','')}  |  **Alarm:** {rec.get('AlarmLevel','')}")
-        st.write(f"**Location:** {rec.get('Address','')} {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}")
-        st.write("**Narrative:**")
-        st.text_area("Narrative (read-only)", value=str(rec.get("Narrative","")), height=220, key="narrative_readonly_print", disabled=True)
-        ip = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
-        ia = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
-        ip_view = ip[ip[PRIMARY_KEY].astype(str) == str(sel)]
-        ia_view = ia[ia[PRIMARY_KEY].astype(str) == str(sel)]
-        st.markdown(f"**Personnel on Scene ({len(ip_view)}):**")
-        show_person_cols = [c for c in ["Name","Role","Hours","RespondedIn"] if c in ip_view.columns]
-        st.dataframe(ip_view[show_person_cols] if not ip_view.empty else ip_view, use_container_width=True, hide_index=True, key="grid_print_personnel")
-        st.markdown(f"**Apparatus on Scene ({len(ia_view)}):**")
-        show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
-        st.dataframe(ia_view[show_cols] if not ia_view.empty else ia_view, use_container_width=True, hide_index=True, key="grid_print_apparatus")
+        selp = st.selectbox("Pick an Incident", options=base[PRIMARY_KEY].astype(str).tolist(), index=None, key="print_pick_auth")
+    if selp:
+        render_incident_block(data, selp)
+        cc = st.columns(2)
+        with cc[0]:
+            render_print_button("🖨️ Print Report")
+        with cc[1]:
+            render_incident_pdf_ui(data, selp)
 
 with tabs[6]:
     st.header("Export")
@@ -585,7 +891,7 @@ with tabs[6]:
         st.download_button("Download Excel", data=payload, file_name="fire_incident_db_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_export_auth")
     if st.button("Overwrite Source File Now", key="btn_overwrite_source_auth"):
         ok, err = save_to_path(data, file_path)
-        if ok: st.success(f"Wrote: {file_path}")
+        if ok: st.success(f"*" + file_path + "* updated")
         else: st.error(f"Failed: {err}")
 
 with tabs[7]:
