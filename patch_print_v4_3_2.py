@@ -1,4 +1,5 @@
 # patch_print_v4_3_2.py
+# Shared renderer for Print & Review + working Print button
 from typing import Dict
 import pandas as pd
 import streamlit.components.v1 as components
@@ -6,8 +7,8 @@ import streamlit.components.v1 as components
 INCIDENT_EXTRAS = [
     "CallerName",
     "CallerPhone",
-    "ReportWriter",  # manual
-    "Approver",      # manual
+    "ReportWriter",  # manual name on form
+    "Approver",      # manual name on form
 ]
 
 def _ensure_columns(df: pd.DataFrame, cols):
@@ -19,7 +20,7 @@ def _ensure_columns(df: pd.DataFrame, cols):
     return df
 
 def apply_patch(env: dict):
-    # Extend Incidents table with extras when ensured
+    # Extend Incidents table with extras during ensure_table call
     if "ensure_table" in env:
         orig = env["ensure_table"]
         def wrapped(data: Dict[str, pd.DataFrame], name: str, cols: list):
@@ -65,7 +66,6 @@ def render_incident_block(st, data: Dict[str, pd.DataFrame], PRIMARY_KEY: str, s
         f"{rec.get('Address','')} {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}"
     )
 
-    # Caller / authorship
     caller_name  = rec.get('CallerName','')
     caller_phone = rec.get('CallerPhone','')
     writer_name  = rec.get('ReportWriter','')
@@ -80,7 +80,6 @@ def render_incident_block(st, data: Dict[str, pd.DataFrame], PRIMARY_KEY: str, s
         f"{' — at ' + str(rec.get('ReviewedAt')) if rec.get('ReviewedAt') else ''}"
     )
 
-    # Times
     st.write(
         f"**Times —** "
         f"Alarm: {times_row.get('Alarm','')}  |  "
@@ -89,7 +88,6 @@ def render_incident_block(st, data: Dict[str, pd.DataFrame], PRIMARY_KEY: str, s
         f"Clear: {times_row.get('Clear','')}"
     )
 
-    # Narrative (read-only)
     st.write("**Narrative:**")
     st.text_area("Narrative (read-only)",
                  value=str(rec.get("Narrative","")),
@@ -97,7 +95,6 @@ def render_incident_block(st, data: Dict[str, pd.DataFrame], PRIMARY_KEY: str, s
                  key=f"narrative_readonly_{sel}",
                  disabled=True)
 
-    # Personnel & Apparatus
     ip = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), ["IncidentNumber","Name","Role","Hours","RespondedIn"])
     ia = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), ["IncidentNumber","Unit","UnitType","Role","Actions"])
     ip_view = ip[ip[PRIMARY_KEY].astype(str) == str(sel)]
