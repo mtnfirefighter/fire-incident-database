@@ -73,6 +73,20 @@ def ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
 def ensure_table(data: Dict[str, pd.DataFrame], name: str, cols: List[str]):
     data[name] = ensure_columns(data.get(name, pd.DataFrame()), cols)
 
+def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Trim whitespace from headers and string cells."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    for c in df.columns:
+        try:
+            if pd.api.types.is_object_dtype(df[c]) or str(df[c].dtype) == "string":
+                df[c] = df[c].astype(str).str.strip()
+        except Exception:
+            pass
+    return df
+
 def get_lookups(data: Dict[str, pd.DataFrame]) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
     for sheet, col in LOOKUP_SHEETS.items():
@@ -105,6 +119,7 @@ def _name_rank_first_last(row: pd.Series) -> str:
     return " ".join(parts).strip()
 
 def build_person_options(df: pd.DataFrame) -> list:
+    df = normalize_df(df)
     if "Name" in df and df["Name"].notna().any():
         s = df["Name"].astype(str)
     elif "FullName" in df and df["FullName"].notna().any():
@@ -119,18 +134,42 @@ def build_person_options(df: pd.DataFrame) -> list:
     return sorted(set(vals))
 
 def build_unit_options(df: pd.DataFrame) -> list:
-    for col in ["UnitNumber","CallSign","Name"]:
-        if col in df.columns and df[col].notna().any():
-            s = df[col].astype(str); break
-    else:
-        s = pd.Series([], dtype=str)
-    vals = s.dropna().map(lambda x: x.strip()).replace("", pd.NA).dropna().unique().tolist()
+    """Collect unit labels from many possible column names; prefer Active=Yes when present."""
+    df = normalize_df(df)
+    if df is None or df.empty:
+        return []
+    # Active filter (optional)
+    try:
+        df_use = df[df["Active"].astype(str).str.lower().isin(["yes","true","1"])] if "Active" in df.columns else df
+    except Exception:
+        df_use = df
+
+    candidate_cols = [
+        "Unit","UnitNumber","Unit #","Unit_Number",
+        "CallSign","Call Sign",
+        "Name","Apparatus","Truck","VehicleID","Vehicle ID","Unit Name"
+    ]
+    series_list = []
+    for col in candidate_cols:
+        if col in df_use.columns and df_use[col].notna().any():
+            series_list.append(df_use[col].astype(str).str.strip())
+
+    if not series_list:
+        return []
+
+    s = pd.concat(series_list, ignore_index=True)
+    vals = (s.dropna()
+              .map(lambda x: x.strip())
+              .replace("", pd.NA)
+              .dropna()
+              .unique()
+              .tolist())
     return sorted(set(vals))
 
 def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
-    p = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA).copy()
+    p = normalize_df(ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA)).copy()
     if "Rank" in p.columns and not p.empty:
-        p["Rank"] = p["Rank"].astype(str)  # free-text ranks
+        p["Rank"] = p["Rank"].astype(str)
     if not p.empty:
         mask_name_blank = p["Name"].isna() | (p["Name"].astype(str).str.strip()=="")
         p.loc[mask_name_blank, "Name"] = p.loc[mask_name_blank].apply(_name_rank_first_last, axis=1)
@@ -143,7 +182,7 @@ def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
             p["Active"] = "Yes"
     data["Personnel"] = p
 
-    a = ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA).copy()
+    a = normalize_df(ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA)).copy()
     if not a.empty:
         if "Active" in a.columns:
             m = a["Active"].isna() | (a["Active"].astype(str).str.strip()=="")
@@ -173,7 +212,8 @@ def apply_role_presets(df: pd.DataFrame) -> pd.DataFrame:
 def can(user_row: dict, perm: str) -> bool:
     return _coerce_bool(user_row.get(perm, False))
 
-st.sidebar.title("📝 Fire Incident Reports — v4.3.2")
+# Sidebar / load
+st.sidebar.title("📝 Fire Incident Reports — v4.3.4")
 file_path = st.sidebar.text_input("Excel path", value=DEFAULT_FILE, key="path_input_auth")
 uploaded = st.sidebar.file_uploader("Upload/replace workbook (.xlsx)", type=["xlsx"], key="upload_auth")
 if uploaded:
@@ -186,10 +226,15 @@ st.sidebar.caption(f"File exists: {'✅' if os.path.exists(file_path) else '❌'
 data: Dict[str, pd.DataFrame] = {}
 if os.path.exists(file_path):
     data = load_workbook(file_path)
+    # normalize key sheets after loading
+    for k in ["Personnel","Apparatus","Incidents"]:
+        if k in data:
+            data[k] = normalize_df(data[k])
 else:
     st.info("Upload or point to your Excel workbook to begin.")
     st.stop()
 
+# Ensure tables
 ensure_table(data, "Incidents", [
     PRIMARY_KEY,"IncidentDate","IncidentTime","IncidentType","ResponsePriority","AlarmLevel","Shift",
     "LocationName","Address","City","State","PostalCode","Latitude","Longitude",
@@ -199,6 +244,7 @@ ensure_table(data, "Personnel", PERSONNEL_SCHEMA)
 ensure_table(data, "Apparatus", APPARATUS_SCHEMA)
 for t, cols in CHILD_TABLES.items(): ensure_table(data, t, cols)
 
+# Users
 users = ensure_columns(data.get("Users", pd.DataFrame()), USERS_SCHEMA)
 if users.empty or "Username" not in users.columns or users["Username"].isna().all():
     users = pd.DataFrame([
@@ -226,20 +272,24 @@ def sign_out_button():
     if st.button("Sign Out", key="btn_logout_auth"):
         st.session_state.pop("user", None); st.experimental_rerun()
 
+# Repair rosters
 data = repair_rosters(data)
 lookups = get_lookups(data)
 
+# Auth gate
 if "user" not in st.session_state:
     sign_in_ui(data["Users"]); st.stop()
 user = st.session_state["user"]
-st.sidebar.write(f"**Logged in as:** {user.get('FullName', user.get('Username',''))}  \\nRole: {user.get('Role','')}")
+st.sidebar.write(f"**Logged in as:** {user.get('FullName', user.get('Username',''))}  \nRole: {user.get('Role','')}")
 sign_out_button()
 
 tabs = st.tabs(["Write Report","Review Queue","Rejected","Approved","Rosters","Print","Export","Admin","Diagnostics"])
 
+# Write Report
 with tabs[0]:
     st.header("Write Report")
     master = data["Incidents"].copy()
+
     preselect = st.session_state.get("edit_incident_preselect")
     force_edit = st.session_state.get("force_edit_mode", False)
     if preselect:
@@ -254,7 +304,7 @@ with tabs[0]:
         elif can(user,"CanEditOwn"):
             options_df = master[master["CreatedBy"].astype(str) == user.get("Username")]
         else:
-            options_df = master.iloc(0,0)
+            options_df = master.iloc[0:0]
         options = options_df[PRIMARY_KEY].dropna().astype(str).tolist() if PRIMARY_KEY in options_df.columns else []
         kwargs = {"options": options, "placeholder": "Choose...", "key": "pick_edit_write_auth"}
         if preselect and preselect in options:
@@ -338,9 +388,45 @@ with tabs[0]:
 
     with st.container(border=True):
         st.subheader("Apparatus on Scene")
-        app_df = ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA)
+
+        # Always read fresh and normalize
+        app_df = normalize_df(ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA))
+
+        # Quick refresh from Excel if needed
+        if st.button("Refresh apparatus list from Excel", key="btn_refresh_app_list"):
+            data_reload = load_workbook(file_path)
+            if "Apparatus" in data_reload:
+                data["Apparatus"] = normalize_df(ensure_columns(data_reload.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA))
+            app_df = normalize_df(ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA))
+
         unit_opts = build_unit_options(app_df)
+
+        # Diagnostics: show headers and a peek at key columns
+        with st.expander("Show apparatus detection details"):
+            st.write("Headers:", list(app_df.columns))
+            st.write("Detected option count:", len(unit_opts))
+            for c in ["Unit","UnitNumber","Unit #","Unit_Number","CallSign","Call Sign","Name","Apparatus","Truck","VehicleID","Vehicle ID","Unit Name","Active"]:
+                if c in app_df.columns:
+                    st.write(f"{c} (top 10):", app_df[c].dropna().astype(str).head(10).tolist())
+
+        st.caption(f"Detected apparatus options: **{len(unit_opts)}**")
         picked_units = st.multiselect("Pick apparatus units", options=unit_opts, key="w_pick_units_auth")
+
+        # Fallback: allow adding a custom unit if not listed
+        custom_unit = st.text_input("Or type a custom unit (if not listed)", key="w_custom_unit_auth")
+        if st.button("Add custom unit to this incident", key="w_add_custom_unit_btn"):
+            if not inc_num or str(inc_num).strip() == "":
+                st.error("Enter **IncidentNumber** before adding apparatus.")
+            elif not custom_unit.strip():
+                st.error("Type a custom unit name first.")
+            else:
+                inc_key = str(inc_num).strip()
+                df = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
+                new = {PRIMARY_KEY: inc_key, "Unit": custom_unit.strip(), "UnitType": None, "Role":"Support","Actions":""}
+                data["Incident_Apparatus"] = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
+                if st.session_state.get("autosave", True): save_to_path(data, file_path)
+                st.success(f"Added custom unit '{custom_unit.strip()}' to incident {inc_key}.")
+
         unit_type_options = list(dict.fromkeys(["Mini Pumper"] + lookups.get("UnitType", [])))
         cc2 = st.columns(4)
         unit_type = cc2[0].selectbox("UnitType", options=[""]+unit_type_options, index=0, key="w_unit_type_auth")
@@ -352,13 +438,16 @@ with tabs[0]:
             else:
                 inc_key = str(inc_num).strip()
                 df = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
+                add_list = picked_units.copy()
+                if custom_unit and custom_unit.strip():
+                    add_list = list(dict.fromkeys(add_list + [custom_unit.strip()]))
                 new = [{
                     PRIMARY_KEY: inc_key,
                     "Unit": u,
                     "UnitType": (unit_type if unit_type else None),
                     "Role": unit_role,
                     "Actions": unit_actions or ""
-                } for u in picked_units]
+                } for u in add_list]
                 if new:
                     data["Incident_Apparatus"] = pd.concat([df, pd.DataFrame(new)], ignore_index=True)
                     if st.session_state.get("autosave", True): save_to_path(data, file_path)
@@ -436,6 +525,7 @@ with tabs[0]:
             if st.session_state.get("autosave", True): save_to_path(data, file_path)
             st.success("Submitted for review.")
 
+# Review Queue
 with tabs[1]:
     st.header("Review Queue")
     pending = data["Incidents"][data["Incidents"]["Status"].astype(str) == "Submitted"]
@@ -472,6 +562,7 @@ with tabs[1]:
                 if st.session_state.get("autosave", True): save_to_path(data, file_path)
                 st.info("Moved back to Draft.")
 
+# Rejected
 with tabs[2]:
     st.header("Rejected Reports")
     if can(user,"CanEditAll"):
@@ -497,6 +588,7 @@ with tabs[2]:
             st.session_state["force_edit_mode"] = True
             st.success("Moved to Draft. Go to Write Report → Edit to revise and resubmit.")
 
+# Approved
 with tabs[3]:
     st.header("Approved Reports")
     approved = data["Incidents"][data["Incidents"]["Status"].astype(str) == "Approved"]
@@ -531,15 +623,15 @@ with tabs[3]:
         else:
             st.write("_None recorded._")
 
+# Rosters
 with tabs[4]:
     st.header("Rosters")
     st.caption("Edit, then click Save. Rank is free text (letters allowed).")
-    # Roster editing still permission-gated in earlier build; keep simple here:
-    personnel = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA)
+    personnel = normalize_df(ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA))
     if "Rank" in personnel.columns:
         personnel["Rank"] = personnel["Rank"].astype(str)
     personnel_edit = st.data_editor(personnel, num_rows="dynamic", use_container_width=True, key="editor_personnel_auth")
-    apparatus = ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA)
+    apparatus = normalize_df(ensure_columns(data.get("Apparatus", pd.DataFrame()), APPARATUS_SCHEMA))
     apparatus_edit = st.data_editor(apparatus, num_rows="dynamic", use_container_width=True, key="editor_apparatus_auth")
     c = st.columns(3)
     if c[0].button("Save Personnel to Excel", key="save_personnel_auth"):
@@ -551,6 +643,7 @@ with tabs[4]:
         ok, err = save_to_path(data, file_path)
         st.success("Saved.") if ok else st.error(err)
 
+# Print
 with tabs[5]:
     st.header("Print")
     status = st.selectbox("Filter by Status", options=["","Approved","Submitted","Draft","Rejected"], key="print_status_auth")
@@ -578,6 +671,7 @@ with tabs[5]:
         show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
         st.dataframe(ia_view[show_cols] if not ia_view.empty else ia_view, use_container_width=True, hide_index=True, key="grid_print_apparatus")
 
+# Export
 with tabs[6]:
     st.header("Export")
     if st.button("Build Excel for Download", key="btn_build_export_auth"):
@@ -588,6 +682,7 @@ with tabs[6]:
         if ok: st.success(f"Wrote: {file_path}")
         else: st.error(f"Failed: {err}")
 
+# Admin
 with tabs[7]:
     st.header("Admin — User Management & Permissions")
     users_df = apply_role_presets(ensure_columns(data.get("Users", pd.DataFrame()), USERS_SCHEMA))
@@ -602,6 +697,7 @@ with tabs[7]:
         else:
             st.error(err)
 
+# Diagnostics
 with tabs[8]:
     st.header("Diagnostics")
     st.write(f"**App dir:** {os.path.dirname(__file__)}")
