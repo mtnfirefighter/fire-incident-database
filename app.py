@@ -329,6 +329,32 @@ with tabs[0]:
         this_per_edit = st.data_editor(this_per, num_rows="dynamic", use_container_width=True, key="editor_incident_personnel")
         cdel = st.columns(2)
         if cdel[0].button("Save Personnel Grid", key="btn_save_incident_personnel"):
+
+        # Backfill PersonnelID for current incident from roster (non-destructive)
+        _possible_inc_vars = []
+        for _cand in ["sel", "selp", "inc_num", "inc_key", "incident_id", "incident_number"]:
+            try:
+                _possible_inc_vars.append(str(eval(_cand)).strip())
+            except Exception:
+                pass
+
+        _current_incident = None
+        for v in _possible_inc_vars:
+            if v not in (None, "", "None"):
+                _current_incident = v
+                break
+
+        if _current_incident:
+            if st.button("Backfill Personnel IDs (from roster)", key="btn_backfill_personnelid"):
+                changed = _backfill_personnel_ids_for_incident(data, _current_incident, PRIMARY_KEY=PRIMARY_KEY)
+                if changed:
+                    if st.session_state.get("autosave", True):
+                        save_to_path(data, file_path)
+                    st.success(f"Backfilled PersonnelID for incident {_current_incident}.")
+                    st.rerun()
+                else:
+                    st.info("No PersonnelID changes needed for this incident.")
+
             base = cur_per[cur_per[PRIMARY_KEY].astype(str) != (str(inc_num).strip() if inc_num else "__none__")]
             if "Delete" in this_per_edit.columns:
                 this_per_edit = this_per_edit[this_per_edit["Delete"] != True].drop(columns=["Delete"], errors="ignore")
@@ -586,6 +612,58 @@ with tabs[5]:
             from reportlab.lib.pagesizes import LETTER
             from reportlab.pdfgen import canvas
             from reportlab.lib.units import inch
+
+
+def _backfill_personnel_ids_for_incident(data, primary_key_value, PRIMARY_KEY="IncidentNumber"):
+    """
+    Fills PersonnelID in data["Incident_Personnel"] for the given incident by merging with data["Personnel"].
+    Returns True if any change was made.
+    """
+    import pandas as pd
+    if not isinstance(data, dict):
+        return False
+    ip = data.get("Incident_Personnel", pd.DataFrame()).copy()
+    roster = data.get("Personnel", pd.DataFrame()).copy()
+    if ip is None or ip.empty or roster is None or roster.empty:
+        return False
+    if PRIMARY_KEY not in ip.columns:
+        return False
+
+    # normalize roster columns
+    if "PersonnelID" not in roster.columns:
+        for alt in ["ID","MemberID"]:
+            if alt in roster.columns:
+                roster = roster.rename(columns={alt:"PersonnelID"})
+                break
+    # Build Name in roster if missing
+    if "Name" not in roster.columns:
+        fn = roster["FirstName"].astype(str) if "FirstName" in roster.columns else ""
+        ln = roster["LastName"].astype(str) if "LastName" in roster.columns else ""
+        roster["Name"] = (fn.str.strip() + " " + ln.str.strip()).str.strip()
+
+    # Work only on this incident
+    m = ip[PRIMARY_KEY].astype(str) == str(primary_key_value)
+    if not m.any():
+        return False
+    sub = ip.loc[m].copy()
+
+    # Merge by Name to get PersonnelID where missing/None
+    if "Name" in sub.columns and "Name" in roster.columns:
+        merged = sub.merge(roster[["Name","PersonnelID"]].drop_duplicates(),
+                           on="Name", how="left", suffixes=("","_roster"))
+        # Decide new PersonnelID
+        if "PersonnelID" in merged.columns and "PersonnelID_roster" in merged.columns:
+            before = merged["PersonnelID"].isna().sum()
+            merged["PersonnelID"] = merged["PersonnelID"].fillna(merged["PersonnelID_roster"])
+            merged = merged.drop(columns=[c for c in ["PersonnelID_roster"] if c in merged.columns])
+            # write back
+            ip.loc[m, merged.columns] = merged.values
+            data["Incident_Personnel"] = ip
+            after = merged["PersonnelID"].isna().sum()
+            return after < before
+    return False
+
+
             _PDF_OK = True
         except Exception:
             _PDF_OK = False
