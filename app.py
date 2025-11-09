@@ -12,7 +12,7 @@ PRIMARY_KEY = "IncidentNumber"
 
 CHILD_TABLES = {
     "Incident_Times": ["IncidentNumber","Alarm","Enroute","Arrival","Clear"],
-    "Incident_Personnel": ["IncidentNumber","Name","Role","Hours","RespondedIn"],
+    "Incident_Personnel": ["IncidentNumber","PersonnelID","Name","Role","Hours","RespondedIn"],
     "Incident_Apparatus": ["IncidentNumber","Unit","UnitType","Role","Actions"],
     "Incident_Actions": ["IncidentNumber","Action","Notes"],
 }
@@ -117,6 +117,52 @@ def build_person_options(df: pd.DataFrame) -> list:
         s = pd.Series([], dtype=str)
     vals = s.dropna().map(lambda x: x.strip()).replace("", pd.NA).dropna().unique().tolist()
     return sorted(set(vals))
+
+
+
+def _norm_label_person(s: str) -> str:
+    if s is None: return ""
+    return " ".join(str(s).strip().lower().split())
+
+def _label_variants_person(row) -> list:
+    # Build possible labels to match what's shown in the multiselect
+    fn = str(row.get("FirstName") or "").strip()
+    ln = str(row.get("LastName") or "").strip()
+    rk = str(row.get("Rank") or "").strip()
+    name = str(row.get("Name") or "").strip()
+    full = str(row.get("FullName") or "").strip()
+
+    candidates = [
+        name,
+        full,
+        f"{rk} {fn} {ln}".strip(),
+        f"{fn} {ln}".strip(),
+        f"{ln}, {fn}".strip(", "),
+        fn,
+        ln,
+    ]
+    vals = []
+    seen = set()
+    for c in candidates:
+        n = _norm_label_person(c)
+        if n and n not in seen:
+            vals.append(c); seen.add(n)
+    return vals
+
+def lookup_person_from_label(people_df, label: str):
+    """Return {'PersonnelID': '...', 'Name': 'First Last'} best match for a multiselect label."""
+    if people_df is None or people_df.empty:
+        return {"PersonnelID": None, "Name": label}
+    target = _norm_label_person(label)
+    for _, r in people_df.iterrows():
+        pid = r.get("PersonnelID")
+        # Display name to store
+        dn = str(r.get("Name") or r.get("FullName") or f"{r.get('FirstName','')} {r.get('LastName','')}".strip()).strip()
+        for cand in _label_variants_person(r):
+            if _norm_label_person(cand) == target:
+                return {"PersonnelID": (None if pd.isna(pid) else str(pid)), "Name": dn if dn else label}
+    # fallback if no match
+    return {"PersonnelID": None, "Name": label}
 
 def build_unit_options(df: pd.DataFrame) -> list:
     for col in ["UnitNumber","CallSign","Name"]:
@@ -302,25 +348,31 @@ with tabs[0]:
         role_default = cc[0].selectbox("Default Role", options=roles, index=0 if roles else None, key="w_role_default_auth")
         hours_default = cc[1].number_input("Default Hours", value=0.0, min_value=0.0, step=0.5, key="w_hours_default_auth")
         responded_in_default = cc[2].selectbox("Responded In (optional)", options=[""]+unit_opts_all, index=0, key="w_resp_in_default_auth")
-        if cc[3].button("Add Selected Members", key="w_add_people_btn_auth"):
-            if not inc_num or str(inc_num).strip() == "":
-                st.error("Enter **IncidentNumber** before adding members.")
-            else:
-                inc_key = str(inc_num).strip()
-                df = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
-                new = [{
-                    PRIMARY_KEY: inc_key,
-                    "Name": n,
-                    "Role": role_default,
-                    "Hours": hours_default,
-                    "RespondedIn": (responded_in_default or None)
-                } for n in picked_people]
-                if new:
-                    data["Incident_Personnel"] = pd.concat([df, pd.DataFrame(new)], ignore_index=True)
-                    if st.session_state.get("autosave", True): save_to_path(data, file_path)
-                    st.success(f"Added {len(new)} member(s) to incident {inc_key}.")
-                else:
-                    st.warning("No members selected.")
+        
+if cc[3].button("Add Selected Members", key="w_add_people_btn_auth"):
+    if not inc_num or str(inc_num).strip() == "":
+        st.error("Enter **IncidentNumber** before adding members.")
+    else:
+        inc_key = str(inc_num).strip()
+        df = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
+        new_rows = []
+        for lbl in picked_people:
+            rec = lookup_person_from_label(people_df, lbl)
+            new_rows.append({
+                PRIMARY_KEY: inc_key,
+                "PersonnelID": rec.get("PersonnelID"),
+                "Name": rec.get("Name"),
+                "Role": role_default,
+                "Hours": hours_default,
+                "RespondedIn": (responded_in_default or None)
+            })
+        if new_rows:
+            data["Incident_Personnel"] = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+            if st.session_state.get("autosave", True): save_to_path(data, file_path)
+            st.success(f"Added {len(new_rows)} member(s) to incident {inc_key}.")
+        else:
+            st.warning("No members selected.")
+
         cur_per = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
         this_per = cur_per[cur_per[PRIMARY_KEY].astype(str) == (str(inc_num).strip() if inc_num else "__none__")].copy()
         if not this_per.empty and "Delete" not in this_per.columns:
@@ -520,7 +572,7 @@ with tabs[3]:
         ia_view = ia[ia[PRIMARY_KEY].astype(str) == str(sela)]
         st.markdown(f"**Personnel on Scene ({len(ip_view)}):**")
         if not ip_view.empty:
-            show_person_cols = [c for c in ["Name","Role","Hours","RespondedIn"] if c in ip_view.columns]
+            show_person_cols = [c for c in ["PersonnelID","Name","Role","Hours","RespondedIn"] if c in ip_view.columns]
             st.dataframe(ip_view[show_person_cols], use_container_width=True, hide_index=True, key="grid_approved_personnel")
         else:
             st.write("_None recorded._")
@@ -572,7 +624,7 @@ with tabs[5]:
         ip_view = ip[ip[PRIMARY_KEY].astype(str) == str(sel)]
         ia_view = ia[ia[PRIMARY_KEY].astype(str) == str(sel)]
         st.markdown(f"**Personnel on Scene ({len(ip_view)}):**")
-        show_person_cols = [c for c in ["Name","Role","Hours","RespondedIn"] if c in ip_view.columns]
+        show_person_cols = [c for c in ["PersonnelID","Name","Role","Hours","RespondedIn"] if c in ip_view.columns]
         st.dataframe(ip_view[show_person_cols] if not ip_view.empty else ip_view, use_container_width=True, hide_index=True, key="grid_print_personnel")
         st.markdown(f"**Apparatus on Scene ({len(ia_view)}):**")
         show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
