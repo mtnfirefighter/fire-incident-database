@@ -578,91 +578,6 @@ with tabs[5]:
         show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
         st.dataframe(ia_view[show_cols] if not ia_view.empty else ia_view, use_container_width=True, hide_index=True, key="grid_print_apparatus")
 
-        # --- PRINT / EXPORT CONTROLS (Print tab only) ---
-        import streamlit.components.v1 as components
-        import html as _html
-        import io
-        try:
-            from reportlab.lib.pagesizes import LETTER
-            from reportlab.pdfgen import canvas
-            from reportlab.lib.units import inch
-            _PDF_OK = True
-        except Exception:
-            _PDF_OK = False
-
-        # Resolve selected incident record
-        try:
-            rec = base[base[PRIMARY_KEY].astype(str) == str(sel)].iloc[0].to_dict()
-        except Exception:
-            rec = {}
-
-        # Times
-        times_df = ensure_columns(data.get("Incident_Times", pd.DataFrame()), CHILD_TABLES["Incident_Times"])
-        trow = {}
-        if not times_df.empty:
-            _m = times_df[PRIMARY_KEY].astype(str) == str(sel)
-            if _m.any():
-                trow = times_df[_m].iloc[0].to_dict()
-
-        # Personnel/Apparatus for this incident (fresh views)
-        ip_df = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
-        ia_df = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
-        ip_view2 = ip_df[ip_df[PRIMARY_KEY].astype(str) == str(sel)]
-        ia_view2 = ia_df[ia_df[PRIMARY_KEY].astype(str) == str(sel)]
-
-        def esc(x): return _html.escape("" if x is None else str(x))
-
-        html_report = f"""
-<h2>Incident #{esc(sel)}</h2>
-<b>Date/Time:</b> {esc(rec.get('IncidentDate',''))} {esc(rec.get('IncidentTime',''))}<br>
-<b>Location:</b> {esc(rec.get('LocationName',''))} — {esc(rec.get('Address',''))} {esc(rec.get('City',''))} {esc(rec.get('State',''))} {esc(rec.get('PostalCode',''))}<br>
-<b>Caller:</b> {esc(rec.get('CallerName','') or 'N/A')} ({esc(rec.get('CallerPhone','') or 'N/A')})<br>
-<b>Report Writer:</b> {esc(rec.get('ReportWriter','') or rec.get('CreatedBy','') or 'N/A')} &nbsp;&nbsp; <b>Approver:</b> {esc(rec.get('Approver','') or rec.get('ReviewedBy','') or 'N/A')}<br>
-<b>Times:</b> Alarm {esc(trow.get('Alarm',''))} | Enroute {esc(trow.get('Enroute',''))} | Arrival {esc(trow.get('Arrival',''))} | Clear {esc(trow.get('Clear',''))}<br><br>
-<h3>Narrative</h3>
-<div style="white-space: pre-wrap;">{esc(rec.get('Narrative',''))}</div>
-<br>
-<h3>Personnel on Scene</h3>
-{ip_view2.to_html(index=False)}
-<br>
-<h3>Apparatus on Scene</h3>
-{ia_view2.to_html(index=False)}
-"""
-
-        c1, c2, c3 = st.columns(3)
-
-        # 1) Print (browser dialog)
-        if c1.button("🖨️ Print Page", key=f"print_tab_print_{sel}"):
-            components.html("<script>window.print()</script>", height=0, width=0)
-
-        # 2) Download HTML (works everywhere)
-        c2.download_button("⬇️ Download HTML", html_report,
-                           file_name=f"Incident_{sel}.html", mime="text/html",
-                           key=f"print_tab_html_{sel}")
-
-        # 3) Optional PDF (requires 'reportlab' in requirements; otherwise this button won't show)
-        if _PDF_OK and c3.button("📄 Download PDF", key=f"print_tab_pdf_{sel}"):
-            try:
-                buf = io.BytesIO()
-                c = canvas.Canvas(buf, pagesize=LETTER)
-                text = c.beginText(0.5*inch, 10.5*inch)
-                text.setFont("Helvetica", 10)
-                raw = (html_report.replace("<br>", "\n")
-                                  .replace("<h3>", "\n")
-                                  .replace("</h3>", "")
-                                  .replace("<div", "")
-                                  .replace("</div>", ""))
-                for line in raw.split("\n"):
-                    text.textLine(line)
-                c.drawText(text); c.showPage(); c.save()
-                buf.seek(0)
-                st.download_button("Save PDF", data=buf,
-                                   file_name=f"Incident_{sel}.pdf", mime="application/pdf",
-                                   key=f"print_tab_pdf_dl_{sel}")
-            except Exception as e:
-                st.error(f"PDF failed: {e}")
-
-
 with tabs[6]:
     st.header("Export")
     if st.button("Build Excel for Download", key="btn_build_export_auth"):
@@ -701,3 +616,98 @@ with tabs[8]:
     st.dataframe(data['Apparatus'].head(10), use_container_width=True)
     st.write("**Users Top 10:**")
     st.dataframe(data['Users'].head(10), use_container_width=True)
+
+
+
+# === Helper appended by patch (display-only) ===
+def render_personnel_print(data, base_df, sel, PRIMARY_KEY):
+    '''
+    Display-only renderer for Personnel on Scene in the Print tab.
+    Shows PersonnelID if available; else falls back to UnitNumber or Callsign from roster.
+    Returns an HTML table string.
+    '''
+    import pandas as _pd
+    import html as _html
+
+    def _esc(x):
+        return _html.escape('' if x is None else str(x))
+
+    # Pull incident personnel for this incident
+    ip = data.get('Incident_Personnel', _pd.DataFrame()).copy()
+    if ip is None or ip.empty:
+        return '<i>No personnel recorded</i>'
+
+    if PRIMARY_KEY in ip.columns:
+        try:
+            ip = ip[ip[PRIMARY_KEY].astype(str) == str(sel)].copy()
+        except Exception:
+            ip = ip.copy()
+
+    # Normalize expected columns
+    for col in ['PersonnelID','Name','Role','Hours','RespondedIn','UnitNumber','Callsign']:
+        if col not in ip.columns:
+            ip[col] = _pd.NA
+
+    # Pull roster
+    roster = data.get('Personnel', _pd.DataFrame()).copy()
+    if roster is None:
+        roster = _pd.DataFrame()
+
+    # Normalize roster columns we might need
+    if not roster.empty:
+        if 'PersonnelID' not in roster.columns:
+            for alt in ('ID','MemberID'):
+                if alt in roster.columns:
+                    roster = roster.rename(columns={alt:'PersonnelID'})
+                    break
+        if 'Name' not in roster.columns:
+            if 'FirstName' in roster.columns or 'LastName' in roster.columns:
+                fn = roster['FirstName'].astype(str) if 'FirstName' in roster.columns else ''
+                ln = roster['LastName'].astype(str) if 'LastName' in roster.columns else ''
+                roster['Name'] = (fn.str.strip() + ' ' + ln.str.strip()).str.strip()
+        if 'UnitNumber' not in roster.columns:
+            for alt in ('Unit','Unit #','UnitNum','Unit_ID','ApparatusNumber','ApparatusID','Apparatus'):
+                if alt in roster.columns:
+                    roster = roster.rename(columns={alt:'UnitNumber'})
+                    break
+        if 'Callsign' not in roster.columns:
+            for alt in ('CallSign','call_sign','RadioID','Badge','BadgeNumber'):
+                if alt in roster.columns:
+                    roster = roster.rename(columns={alt:'Callsign'})
+                    break
+
+    # Merge for display
+    ip_print = ip.copy()
+    try:
+        if not roster.empty and 'Name' in ip_print.columns and 'Name' in roster.columns:
+            enrich_cols = [c for c in ['PersonnelID','UnitNumber','Callsign'] if c in roster.columns]
+            if enrich_cols:
+                _r = roster[['Name'] + enrich_cols].drop_duplicates()
+                ip_print = ip_print.merge(_r, on='Name', how='left', suffixes=('', '_roster'))
+                for c in enrich_cols:
+                    cr = f'{c}_roster'
+                    if cr in ip_print.columns:
+                        ip_print[c] = ip_print[c].where(~ip_print[c].isna(), ip_print[cr])
+                        ip_print = ip_print.drop(columns=[cr])
+    except Exception:
+        pass
+
+    # Choose identifier to show
+    ident_col = None
+    for c in ('PersonnelID','UnitNumber','Callsign'):
+        if c in ip_print.columns and getattr(ip_print[c], 'notna', lambda: False)().any():
+            ident_col = c
+            break
+
+    # Column order
+    cols = []
+    if ident_col: cols.append(ident_col)
+    for c in ['Name','Role','Hours','RespondedIn']:
+        if c in ip_print.columns: cols.append(c)
+    if not cols:
+        cols = list(ip_print.columns)
+
+    try:
+        return ip_print[cols].to_html(index=False)
+    except Exception:
+        return ip_print.to_html(index=False)
