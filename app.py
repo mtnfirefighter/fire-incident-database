@@ -578,6 +578,91 @@ with tabs[5]:
         show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
         st.dataframe(ia_view[show_cols] if not ia_view.empty else ia_view, use_container_width=True, hide_index=True, key="grid_print_apparatus")
 
+        # --- PRINT / EXPORT CONTROLS (Print tab only) ---
+        import streamlit.components.v1 as components
+        import html as _html
+        import io
+        try:
+            from reportlab.lib.pagesizes import LETTER
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.units import inch
+            _PDF_OK = True
+        except Exception:
+            _PDF_OK = False
+
+        # Resolve selected incident record
+        try:
+            rec = base[base[PRIMARY_KEY].astype(str) == str(sel)].iloc[0].to_dict()
+        except Exception:
+            rec = {}
+
+        # Times
+        times_df = ensure_columns(data.get("Incident_Times", pd.DataFrame()), CHILD_TABLES["Incident_Times"])
+        trow = {}
+        if not times_df.empty:
+            _m = times_df[PRIMARY_KEY].astype(str) == str(sel)
+            if _m.any():
+                trow = times_df[_m].iloc[0].to_dict()
+
+        # Personnel/Apparatus for this incident (fresh views)
+        ip_df = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
+        ia_df = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
+        ip_view2 = ip_df[ip_df[PRIMARY_KEY].astype(str) == str(sel)]
+        ia_view2 = ia_df[ia_df[PRIMARY_KEY].astype(str) == str(sel)]
+
+        def esc(x): return _html.escape("" if x is None else str(x))
+
+        html_report = f"""
+<h2>Incident #{esc(sel)}</h2>
+<b>Date/Time:</b> {esc(rec.get('IncidentDate',''))} {esc(rec.get('IncidentTime',''))}<br>
+<b>Location:</b> {esc(rec.get('LocationName',''))} — {esc(rec.get('Address',''))} {esc(rec.get('City',''))} {esc(rec.get('State',''))} {esc(rec.get('PostalCode',''))}<br>
+<b>Caller:</b> {esc(rec.get('CallerName','') or 'N/A')} ({esc(rec.get('CallerPhone','') or 'N/A')})<br>
+<b>Report Writer:</b> {esc(rec.get('ReportWriter','') or rec.get('CreatedBy','') or 'N/A')} &nbsp;&nbsp; <b>Approver:</b> {esc(rec.get('Approver','') or rec.get('ReviewedBy','') or 'N/A')}<br>
+<b>Times:</b> Alarm {esc(trow.get('Alarm',''))} | Enroute {esc(trow.get('Enroute',''))} | Arrival {esc(trow.get('Arrival',''))} | Clear {esc(trow.get('Clear',''))}<br><br>
+<h3>Narrative</h3>
+<div style="white-space: pre-wrap;">{esc(rec.get('Narrative',''))}</div>
+<br>
+<h3>Personnel on Scene</h3>
+{ip_view2.to_html(index=False)}
+<br>
+<h3>Apparatus on Scene</h3>
+{ia_view2.to_html(index=False)}
+"""
+
+        c1, c2, c3 = st.columns(3)
+
+        # 1) Print (browser dialog)
+        if c1.button("🖨️ Print Page", key=f"print_tab_print_{sel}"):
+            components.html("<script>window.print()</script>", height=0, width=0)
+
+        # 2) Download HTML (works everywhere)
+        c2.download_button("⬇️ Download HTML", html_report,
+                           file_name=f"Incident_{sel}.html", mime="text/html",
+                           key=f"print_tab_html_{sel}")
+
+        # 3) Optional PDF (requires 'reportlab' in requirements; otherwise this button won't show)
+        if _PDF_OK and c3.button("📄 Download PDF", key=f"print_tab_pdf_{sel}"):
+            try:
+                buf = io.BytesIO()
+                c = canvas.Canvas(buf, pagesize=LETTER)
+                text = c.beginText(0.5*inch, 10.5*inch)
+                text.setFont("Helvetica", 10)
+                raw = (html_report.replace("<br>", "\n")
+                                  .replace("<h3>", "\n")
+                                  .replace("</h3>", "")
+                                  .replace("<div", "")
+                                  .replace("</div>", ""))
+                for line in raw.split("\n"):
+                    text.textLine(line)
+                c.drawText(text); c.showPage(); c.save()
+                buf.seek(0)
+                st.download_button("Save PDF", data=buf,
+                                   file_name=f"Incident_{sel}.pdf", mime="application/pdf",
+                                   key=f"print_tab_pdf_dl_{sel}")
+            except Exception as e:
+                st.error(f"PDF failed: {e}")
+
+
 with tabs[6]:
     st.header("Export")
     if st.button("Build Excel for Download", key="btn_build_export_auth"):
@@ -616,39 +701,3 @@ with tabs[8]:
     st.dataframe(data['Apparatus'].head(10), use_container_width=True)
     st.write("**Users Top 10:**")
     st.dataframe(data['Users'].head(10), use_container_width=True)
-
-        # --- Ensure 'PersonnelID' is available for Personnel on Scene ---
-        if "PersonnelID" not in ip_df.columns:
-            ip_df["PersonnelID"] = pd.NA
-            ip_view2 = ip_df[ip_df[PRIMARY_KEY].astype(str) == str(sel)]
-
-        roster = data.get("Personnel", pd.DataFrame()).copy()
-        if not roster.empty:
-            if "PersonnelID" not in roster.columns:
-                for alt in ["ID","MemberID"]:
-                    if alt in roster.columns:
-                        roster = roster.rename(columns={alt:"PersonnelID"})
-                        break
-            if "Name" not in roster.columns:
-                for alt in ["FullName","MemberName"]:
-                    if alt in roster.columns:
-                        roster = roster.rename(columns={alt:"Name"})
-                        break
-
-            if "Name" in roster.columns and "PersonnelID" in roster.columns:
-                merged = ip_view2.merge(
-                    roster[["Name","PersonnelID"]].drop_duplicates(),
-                    on="Name", how="left", suffixes=("","_roster")
-                )
-                if "PersonnelID_roster" in merged.columns:
-                    merged["PersonnelID"] = merged["PersonnelID"].fillna(merged["PersonnelID_roster"])
-                    merged = merged.drop(columns=[c for c in ["PersonnelID_roster"] if c in merged.columns])
-                ip_print = merged
-            else:
-                ip_print = ip_view2.copy()
-        else:
-            ip_print = ip_view2.copy()
-
-        _personnel_cols_print = [c for c in ["PersonnelID","Name","Role","Hours","RespondedIn"] if c in ip_print.columns]
-        if not _personnel_cols_print:
-            _personnel_cols_print = list(ip_print.columns)
