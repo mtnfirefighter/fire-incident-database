@@ -586,100 +586,6 @@ with tabs[5]:
             from reportlab.lib.pagesizes import LETTER
             from reportlab.pdfgen import canvas
             from reportlab.lib.units import inch
-
-def render_personnel_print(data, base_df, sel, PRIMARY_KEY):
-    """
-    Display-only renderer for Personnel on Scene in the Print tab.
-    Attempts to include PersonnelID; if missing, falls back to UnitNumber/Callsign.
-    Returns an HTML table string.
-    """
-    import pandas as _pd
-    import html as _html
-
-    def _esc(x):
-        return _html.escape("" if x is None else str(x))
-
-    # Pull incident personnel for this incident
-    ip = data.get("Incident_Personnel", _pd.DataFrame()).copy()
-    if ip is None or ip.empty:
-        return "<i>No personnel recorded</i>"
-
-    if PRIMARY_KEY in ip.columns:
-        ip = ip[ip[PRIMARY_KEY].astype(str) == str(sel)].copy()
-
-    # Normalize columns possibly present in Incident_Personnel
-    for col in ["PersonnelID", "Name", "Role", "Hours", "RespondedIn", "UnitNumber", "Callsign"]:
-        if col not in ip.columns:
-            ip[col] = _pd.NA
-
-    # Pull roster to enrich IDs if needed
-    roster = data.get("Personnel", _pd.DataFrame()).copy()
-    if roster is None: roster = _pd.DataFrame()
-
-    # Normalize roster columns we might need
-    if not roster.empty:
-        # PersonnelID may live under ID/MemberID
-        if "PersonnelID" not in roster.columns:
-            for alt in ("ID","MemberID"):
-                if alt in roster.columns:
-                    roster = roster.rename(columns={alt:"PersonnelID"})
-                    break
-        # Name or First/Last
-        if "Name" not in roster.columns:
-            if "FirstName" in roster.columns or "LastName" in roster.columns:
-                fn = roster["FirstName"].astype(str) if "FirstName" in roster.columns else ""
-                ln = roster["LastName"].astype(str) if "LastName" in roster.columns else ""
-                roster["Name"] = (fn.str.strip() + " " + ln.str.strip()).str.strip()
-        # UnitNumber / Callsign as alternates to show if no ID
-        if "UnitNumber" not in roster.columns:
-            for alt in ("Unit","Unit #","UnitNum","Unit_ID","ApparatusNumber","ApparatusID","Apparatus"):
-                if alt in roster.columns:
-                    roster = roster.rename(columns={alt:"UnitNumber"})
-                    break
-        if "Callsign" not in roster.columns:
-            for alt in ("CallSign","call_sign","RadioID","Badge","BadgeNumber"):
-                if alt in roster.columns:
-                    roster = roster.rename(columns={alt:"Callsign"})
-                    break
-
-    # If we have roster and names, merge to enrich PersonnelID / UnitNumber / Callsign for DISPLAY
-    ip_print = ip.copy()
-    try:
-        if not roster.empty and "Name" in ip_print.columns and "Name" in roster.columns:
-            enrich_cols = [c for c in ["PersonnelID","UnitNumber","Callsign"] if c in roster.columns]
-            if enrich_cols:
-                ip_print = ip_print.merge(roster[["Name"] + enrich_cols].drop_duplicates(),
-                                          on="Name", how="left", suffixes=("", "_roster"))
-                # Prefer explicit values in incident table; else use roster values
-                for c in enrich_cols:
-                    cr = f"{c}_roster"
-                    if cr in ip_print.columns:
-                        ip_print[c] = ip_print[c].where(~ip_print[c].isna(), ip_print[cr])
-                        ip_print = ip_print.drop(columns=[cr])
-    except Exception:
-        # If any merge error happens, keep original ip_print
-        pass
-
-    # Decide which identifier column to show first
-    ident_col = None
-    for c in ("PersonnelID","UnitNumber","Callsign"):
-        if c in ip_print.columns and ip_print[c].notna().any():
-            ident_col = c
-            break
-
-    # Build final column order for printing
-    cols = []
-    if ident_col: cols.append(ident_col)
-    for c in ["Name","Role","Hours","RespondedIn"]:
-        if c in ip_print.columns: cols.append(c)
-    if not cols:
-        cols = list(ip_print.columns)
-
-    try:
-        return ip_print[cols].to_html(index=False)
-    except Exception:
-        return ip_print.to_html(index=False)
-
             _PDF_OK = True
         except Exception:
             _PDF_OK = False
@@ -717,7 +623,7 @@ def render_personnel_print(data, base_df, sel, PRIMARY_KEY):
 <div style="white-space: pre-wrap;">{esc(rec.get('Narrative',''))}</div>
 <br>
 <h3>Personnel on Scene</h3>
-{render_personnel_print(data, base, sel, PRIMARY_KEY)}
+{ip_view2.to_html(index=False)}
 <br>
 <h3>Apparatus on Scene</h3>
 {ia_view2.to_html(index=False)}
