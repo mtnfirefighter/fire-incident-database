@@ -609,38 +609,6 @@ with tabs[5]:
         ia_df = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
         ip_view2 = ip_df[ip_df[PRIMARY_KEY].astype(str) == str(sel)]
         ia_view2 = ia_df[ia_df[PRIMARY_KEY].astype(str) == str(sel)]
-# ---- DISPLAY-ONLY merge to show PersonnelID in Print ----
-# (does not modify your data; local to Print tab)
-roster__print = data.get("Personnel", pd.DataFrame()).copy()
-ip_print = ip_view2.copy()
-try:
-    # Normalize roster columns we need
-    if not roster__print.empty:
-        if "PersonnelID" not in roster__print.columns:
-            for _alt in ("ID","MemberID"):
-                if _alt in roster__print.columns:
-                    roster__print = roster__print.rename(columns={_alt:"PersonnelID"})
-                    break
-        if "Name" not in roster__print.columns:
-            if "FirstName" in roster__print.columns or "LastName" in roster__print.columns:
-                fn = roster__print["FirstName"].astype(str) if "FirstName" in roster__print.columns else ""
-                ln = roster__print["LastName"].astype(str) if "LastName" in roster__print.columns else ""
-                roster__print["Name"] = (fn.str.strip() + " " + ln.str.strip()).str.strip()
-    # Merge by Name to bring PersonnelID for display
-    if not ip_print.empty and not roster__print.empty and "Name" in ip_print.columns and "Name" in roster__print.columns:
-        _r = roster__print[["Name","PersonnelID"]].drop_duplicates()
-        ip_print = ip_print.merge(_r, on="Name", how="left", suffixes=("", "_roster"))
-        if "PersonnelID_roster" in ip_print.columns:
-            # Prefer explicit ID in ip_view2 if present; else roster ID
-            ip_print["PersonnelID"] = ip_print["PersonnelID"].where(~ip_print["PersonnelID"].isna(), ip_print["PersonnelID_roster"])
-            ip_print = ip_print.drop(columns=[c for c in ["PersonnelID_roster"] if c in ip_print.columns])
-    _personnel_cols_print = [c for c in ["PersonnelID","Name","Role","Hours","RespondedIn"] if c in ip_print.columns]
-    if not _personnel_cols_print:
-        _personnel_cols_print = list(ip_print.columns)
-except Exception as _e_print_merge:
-    # Fail-safe: if anything goes wrong, fall back to original
-    _personnel_cols_print = None
-
 
         def esc(x): return _html.escape("" if x is None else str(x))
 
@@ -655,7 +623,7 @@ except Exception as _e_print_merge:
 <div style="white-space: pre-wrap;">{esc(rec.get('Narrative',''))}</div>
 <br>
 <h3>Personnel on Scene</h3>
-{ip_print[_personnel_cols_print].to_html(index=False) if (_personnel_cols_print is not None and not ip_print.empty) else ip_view2.to_html(index=False)}
+{ip_view2.to_html(index=False)}
 <br>
 <h3>Apparatus on Scene</h3>
 {ia_view2.to_html(index=False)}
