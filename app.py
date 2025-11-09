@@ -12,7 +12,7 @@ PRIMARY_KEY = "IncidentNumber"
 
 CHILD_TABLES = {
     "Incident_Times": ["IncidentNumber","Alarm","Enroute","Arrival","Clear"],
-    "Incident_Personnel": ["IncidentNumber","Name","Role","Hours","RespondedIn"],
+    "Incident_Personnel": ["IncidentNumber","PersonnelID","Name","Role","Hours","RespondedIn"],
     "Incident_Apparatus": ["IncidentNumber","Unit","UnitType","Role","Actions"],
     "Incident_Actions": ["IncidentNumber","Action","Notes"],
 }
@@ -103,6 +103,48 @@ def _name_rank_first_last(row: pd.Series) -> str:
     rk = str(row.get("Rank") or "").strip()
     parts = [p for p in [rk, fn, ln] if p]
     return " ".join(parts).strip()
+
+
+def _norm_label(s: str) -> str:
+    if s is None: return ""
+    return " ".join(str(s).strip().lower().split())
+
+def _build_person_label(row):
+    fn = str(row.get("FirstName") or "").strip()
+    ln = str(row.get("LastName") or "").strip()
+    rk = str(row.get("Rank") or "").strip()
+    name = str(row.get("Name") or "").strip()
+    full = str(row.get("FullName") or "").strip()
+    labels = [
+        name,
+        full,
+        f"{fn} {ln}".strip(),
+        f"{rk} {fn} {ln}".strip(),
+        f"{ln}, {fn}".strip(", "),
+        f"{fn}".strip(),
+        f"{ln}".strip(),
+    ]
+    # Deduplicate while normalizing
+    out = []
+    seen = set()
+    for lab in labels:
+        labn = _norm_label(lab)
+        if labn and labn not in seen:
+            seen.add(labn); out.append(lab)
+    # Display name used when we store row
+    display = name or full or f"{fn} {ln}".strip()
+    return out, display
+
+def _person_lookup_index(personnel_df):
+    idx = {}
+    if personnel_df is None or personnel_df.empty:
+        return idx
+    for _, r in personnel_df.iterrows():
+        pid = r.get("PersonnelID")
+        labels, display = _build_person_label(r)
+        for lab in labels:
+            idx[_norm_label(lab)] = {"PersonnelID": (None if pd.isna(pid) else str(pid)), "Name": display}
+    return idx
 
 def build_person_options(df: pd.DataFrame) -> list:
     if "Name" in df and df["Name"].notna().any():
@@ -520,7 +562,7 @@ with tabs[3]:
         ia_view = ia[ia[PRIMARY_KEY].astype(str) == str(sela)]
         st.markdown(f"**Personnel on Scene ({len(ip_view)}):**")
         if not ip_view.empty:
-            show_person_cols = [c for c in ["Name","Role","Hours","RespondedIn"] if c in ip_view.columns]
+            show_person_cols = [c for c in ["PersonnelID","Name","Role","Hours","RespondedIn"] if c in ip_view.columns]
             st.dataframe(ip_view[show_person_cols], use_container_width=True, hide_index=True, key="grid_approved_personnel")
         else:
             st.write("_None recorded._")
@@ -572,7 +614,7 @@ with tabs[5]:
         ip_view = ip[ip[PRIMARY_KEY].astype(str) == str(sel)]
         ia_view = ia[ia[PRIMARY_KEY].astype(str) == str(sel)]
         st.markdown(f"**Personnel on Scene ({len(ip_view)}):**")
-        show_person_cols = [c for c in ["Name","Role","Hours","RespondedIn"] if c in ip_view.columns]
+        show_person_cols = [c for c in ["PersonnelID","Name","Role","Hours","RespondedIn"] if c in ip_view.columns]
         st.dataframe(ip_view[show_person_cols] if not ip_view.empty else ip_view, use_container_width=True, hide_index=True, key="grid_print_personnel")
         st.markdown(f"**Apparatus on Scene ({len(ia_view)}):**")
         show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
