@@ -12,7 +12,7 @@ PRIMARY_KEY = "IncidentNumber"
 
 CHILD_TABLES = {
     "Incident_Times": ["IncidentNumber","Alarm","Enroute","Arrival","Clear"],
-    "Incident_Personnel": ["IncidentNumber","Name","Role","Hours","RespondedIn"],
+    "Incident_Personnel": ["IncidentNumber","PersonnelID","Name","Role","Hours","RespondedIn"],
     "Incident_Apparatus": ["IncidentNumber","Unit","UnitType","Role","Actions"],
     "Incident_Actions": ["IncidentNumber","Action","Notes"],
 }
@@ -308,13 +308,17 @@ with tabs[0]:
             else:
                 inc_key = str(inc_num).strip()
                 df = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
-                new = [{
-                    PRIMARY_KEY: inc_key,
-                    "Name": n,
-                    "Role": role_default,
-                    "Hours": hours_default,
-                    "RespondedIn": (responded_in_default or None)
-                } for n in picked_people]
+                new = []
+for n in picked_people:
+    pid, disp = _lookup_person_id_from_label(people_df, n)
+    new.append({
+        PRIMARY_KEY: inc_key,
+        "PersonnelID": pid,
+        "Name": disp,
+        "Role": role_default,
+        "Hours": hours_default,
+        "RespondedIn": (responded_in_default or None),
+    })
                 if new:
                     data["Incident_Personnel"] = pd.concat([df, pd.DataFrame(new)], ignore_index=True)
                     if st.session_state.get("autosave", True): save_to_path(data, file_path)
@@ -586,6 +590,29 @@ with tabs[5]:
             from reportlab.lib.pagesizes import LETTER
             from reportlab.pdfgen import canvas
             from reportlab.lib.units import inch
+# helper to lookup PersonnelID from roster
+def _lookup_person_id_from_label(people_df, label):
+    import pandas as _pd
+    def _norm(s): return " ".join(str(s or "").strip().lower().split())
+    tgt = _norm(label)
+    if people_df is None or getattr(people_df,"empty",True):
+        return None, label
+    df = people_df.copy()
+    if "Name" not in df.columns:
+        fn = df["FirstName"].astype(str) if "FirstName" in df.columns else ""
+        ln = df["LastName"].astype(str) if "LastName" in df.columns else ""
+        df["Name"] = (fn.str.strip()+" "+ln.str.strip()).str.strip()
+    for _,r in df.iterrows():
+        pid = r.get("PersonnelID",None)
+        full = str(r.get("Name") or r.get("FullName") or "").strip()
+        fn = str(r.get("FirstName") or "").strip()
+        ln = str(r.get("LastName") or "").strip()
+        rk = str(r.get("Rank") or "").strip()
+        candidates=[full,f"{rk} {fn} {ln}".strip(),f"{fn} {ln}".strip(),f"{ln}, {fn}".strip(", ")]
+        for c in candidates:
+            if _norm(c)==tgt and full:
+                return (None if _pd.isna(pid) else str(pid)), full
+    return None, label
             _PDF_OK = True
         except Exception:
             _PDF_OK = False
