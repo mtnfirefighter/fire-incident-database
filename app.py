@@ -12,7 +12,7 @@ PRIMARY_KEY = "IncidentNumber"
 
 CHILD_TABLES = {
     "Incident_Times": ["IncidentNumber","Alarm","Enroute","Arrival","Clear"],
-    "Incident_Personnel": ["IncidentNumber","Name","Role","Hours","RespondedIn","Notes"],
+    "Incident_Personnel": ["IncidentNumber","Name","Role","Hours","RespondedIn"],
     "Incident_Apparatus": ["IncidentNumber","Unit","UnitType","Role","Actions"],
     "Incident_Actions": ["IncidentNumber","Action","Notes"],
 }
@@ -104,67 +104,28 @@ def _name_rank_first_last(row: pd.Series) -> str:
     parts = [p for p in [rk, fn, ln] if p]
     return " ".join(parts).strip()
 
-
 def build_person_options(df: pd.DataFrame) -> list:
-    """
-    Build person labels: 'Rank First Last – <Unit>' if a unit column exists in Personnel.
-    Accepts possible columns: UnitNumber, Unit, RespondedIn.
-    Falls back to Name/FullName.
-    """
-    if df is None or df.empty:
-        return []
-    cols = {c.lower(): c for c in df.columns}
-    first = cols.get("firstname") or cols.get("first") or cols.get("first_name") or cols.get("given")
-    last  = cols.get("lastname")  or cols.get("last")  or cols.get("last_name")  or cols.get("family")
-    rank  = cols.get("rank") or cols.get("title")
-    name  = cols.get("name") or cols.get("fullname") or cols.get("full_name") or cols.get("display")
-    unitc = None
-    for cand in ["UnitNumber","Unit","RespondedIn"]:
-        if cand in df.columns:
-            unitc = cand; break
-
-    def clean(s):
-        s = "" if s is None else str(s).strip()
-        return " ".join(str(s).replace("["," ").replace("]"," ").replace("'"," ").split())
-
-    labels = []
-    src = df.fillna("")
-    for _, r in src.iterrows():
-        if first and last and first in df and last in df:
-            base = " ".join(p for p in [str(r.get(rank) or "").strip(),
-                                        str(r.get(first) or "").strip(),
-                                        str(r.get(last) or "").strip()] if p).strip()
-        elif name and name in df:
-            base = str(r.get(name) or "").strip()
-        else:
-            base = ""
-        base = clean(base)
-        unit = clean(r.get(unitc)) if unitc else ""
-        label = (f"{base} – {unit}".strip(" –") if unit else base)
-        if label:
-            labels.append(label)
-    return sorted(dict.fromkeys([l for l in labels if l]))
+    if "Name" in df and df["Name"].notna().any():
+        s = df["Name"].astype(str)
+    elif "FullName" in df and df["FullName"].notna().any():
+        s = df["FullName"].astype(str)
+    elif all(c in df.columns for c in ["FirstName","LastName","Rank"]):
+        s = df.apply(_name_rank_first_last, axis=1)
+    elif all(c in df.columns for c in ["FirstName","LastName"]):
+        s = (df["FirstName"].fillna("").astype(str).str.strip() + " " + df["LastName"].fillna("").astype(str).str.strip()).str.strip()
+    else:
+        s = pd.Series([], dtype=str)
+    vals = s.dropna().map(lambda x: x.strip()).replace("", pd.NA).dropna().unique().tolist()
+    return sorted(set(vals))
 
 def build_unit_options(df: pd.DataFrame) -> list:
-    """Labels like '12 – Engine 12 – Whitmer VFD' using any available columns."""
-    if df is None or df.empty:
-        return []
-    cols = [c for c in ["UnitNumber","CallSign","Name","Unit","Label"] if c in df.columns]
-    if not cols:
-        return []
-    def nz(x):
-        s = "" if x is None else str(x).strip()
-        return "" if s.lower() in ("nan","none") else s
-    labels = []
-    for _, row in df[cols].fillna("").iterrows():
-        parts, seen = [], set()
-        for c in cols:
-            v = nz(row[c])
-            if v and v not in seen:
-                parts.append(v); seen.add(v)
-        if parts:
-            labels.append(" – ".join(parts))
-    return sorted(dict.fromkeys([p for p in labels if p]))
+    for col in ["UnitNumber","CallSign","Name"]:
+        if col in df.columns and df[col].notna().any():
+            s = df[col].astype(str); break
+    else:
+        s = pd.Series([], dtype=str)
+    vals = s.dropna().map(lambda x: x.strip()).replace("", pd.NA).dropna().unique().tolist()
+    return sorted(set(vals))
 
 def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     p = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA).copy()
@@ -347,18 +308,14 @@ with tabs[0]:
             else:
                 inc_key = str(inc_num).strip()
                 df = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
-                
-new = []
-for n in picked_people:
-    new.append({
-        PRIMARY_KEY: inc_key,
-        "Name": str(n).strip(),
-        "Role": role_default,
-        "Hours": hours_default,
-        "RespondedIn": (responded_in_default or None),
-        "Notes": None
-    })
-if new:
+                new = [{
+                    PRIMARY_KEY: inc_key,
+                    "Name": n,
+                    "Role": role_default,
+                    "Hours": hours_default,
+                    "RespondedIn": (responded_in_default or None)
+                } for n in picked_people]
+                if new:
                     data["Incident_Personnel"] = pd.concat([df, pd.DataFrame(new)], ignore_index=True)
                     if st.session_state.get("autosave", True): save_to_path(data, file_path)
                     st.success(f"Added {len(new)} member(s) to incident {inc_key}.")
@@ -369,15 +326,6 @@ if new:
         if not this_per.empty and "Delete" not in this_per.columns:
             this_per["Delete"] = False
         st.write(f"**Total Personnel on Scene:** {0 if this_per.empty else len(this_per)}")
-        
-        # Reorder columns for readability
-        display_cols = [PRIMARY_KEY, "Name", "RespondedIn", "Role", "Hours", "Notes", "PersonnelID"]
-        for c in display_cols:
-            if c not in this_per.columns:
-                this_per[c] = pd.NA
-        other_cols = [c for c in this_per.columns if c not in display_cols]
-        this_per = this_per[display_cols + other_cols]
-        
         this_per_edit = st.data_editor(this_per, num_rows="dynamic", use_container_width=True, key="editor_incident_personnel")
         cdel = st.columns(2)
         if cdel[0].button("Save Personnel Grid", key="btn_save_incident_personnel"):
