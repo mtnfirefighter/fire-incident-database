@@ -578,91 +578,6 @@ with tabs[5]:
         show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
         st.dataframe(ia_view[show_cols] if not ia_view.empty else ia_view, use_container_width=True, hide_index=True, key="grid_print_apparatus")
 
-        # --- PRINT / EXPORT CONTROLS (Print tab only) ---
-        import streamlit.components.v1 as components
-        import html as _html
-        import io
-        try:
-            from reportlab.lib.pagesizes import LETTER
-            from reportlab.pdfgen import canvas
-            from reportlab.lib.units import inch
-            _PDF_OK = True
-        except Exception:
-            _PDF_OK = False
-
-        # Resolve selected incident record
-        try:
-            rec = base[base[PRIMARY_KEY].astype(str) == str(sel)].iloc[0].to_dict()
-        except Exception:
-            rec = {}
-
-        # Times
-        times_df = ensure_columns(data.get("Incident_Times", pd.DataFrame()), CHILD_TABLES["Incident_Times"])
-        trow = {}
-        if not times_df.empty:
-            _m = times_df[PRIMARY_KEY].astype(str) == str(sel)
-            if _m.any():
-                trow = times_df[_m].iloc[0].to_dict()
-
-        # Personnel/Apparatus for this incident (fresh views)
-        ip_df = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
-        ia_df = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
-        ip_view2 = ip_df[ip_df[PRIMARY_KEY].astype(str) == str(sel)]
-        ia_view2 = ia_df[ia_df[PRIMARY_KEY].astype(str) == str(sel)]
-
-        def esc(x): return _html.escape("" if x is None else str(x))
-
-        html_report = f"""
-<h2>Incident #{esc(sel)}</h2>
-<b>Date/Time:</b> {esc(rec.get('IncidentDate',''))} {esc(rec.get('IncidentTime',''))}<br>
-<b>Location:</b> {esc(rec.get('LocationName',''))} — {esc(rec.get('Address',''))} {esc(rec.get('City',''))} {esc(rec.get('State',''))} {esc(rec.get('PostalCode',''))}<br>
-<b>Caller:</b> {esc(rec.get('CallerName','') or 'N/A')} ({esc(rec.get('CallerPhone','') or 'N/A')})<br>
-<b>Report Writer:</b> {esc(rec.get('ReportWriter','') or rec.get('CreatedBy','') or 'N/A')} &nbsp;&nbsp; <b>Approver:</b> {esc(rec.get('Approver','') or rec.get('ReviewedBy','') or 'N/A')}<br>
-<b>Times:</b> Alarm {esc(trow.get('Alarm',''))} | Enroute {esc(trow.get('Enroute',''))} | Arrival {esc(trow.get('Arrival',''))} | Clear {esc(trow.get('Clear',''))}<br><br>
-<h3>Narrative</h3>
-<div style="white-space: pre-wrap;">{esc(rec.get('Narrative',''))}</div>
-<br>
-<h3>Personnel on Scene</h3>
-{ip_view2.to_html(index=False)}
-<br>
-<h3>Apparatus on Scene</h3>
-{ia_view2.to_html(index=False)}
-"""
-
-        c1, c2, c3 = st.columns(3)
-
-        # 1) Print (browser dialog)
-        if c1.button("🖨️ Print Page", key=f"print_tab_print_{sel}"):
-            components.html("<script>window.print()</script>", height=0, width=0)
-
-        # 2) Download HTML (works everywhere)
-        c2.download_button("⬇️ Download HTML", html_report,
-                           file_name=f"Incident_{sel}.html", mime="text/html",
-                           key=f"print_tab_html_{sel}")
-
-        # 3) Optional PDF (requires 'reportlab' in requirements; otherwise this button won't show)
-        if _PDF_OK and c3.button("📄 Download PDF", key=f"print_tab_pdf_{sel}"):
-            try:
-                buf = io.BytesIO()
-                c = canvas.Canvas(buf, pagesize=LETTER)
-                text = c.beginText(0.5*inch, 10.5*inch)
-                text.setFont("Helvetica", 10)
-                raw = (html_report.replace("<br>", "\n")
-                                  .replace("<h3>", "\n")
-                                  .replace("</h3>", "")
-                                  .replace("<div", "")
-                                  .replace("</div>", ""))
-                for line in raw.split("\n"):
-                    text.textLine(line)
-                c.drawText(text); c.showPage(); c.save()
-                buf.seek(0)
-                st.download_button("Save PDF", data=buf,
-                                   file_name=f"Incident_{sel}.pdf", mime="application/pdf",
-                                   key=f"print_tab_pdf_dl_{sel}")
-            except Exception as e:
-                st.error(f"PDF failed: {e}")
-
-
 with tabs[6]:
     st.header("Export")
     if st.button("Build Excel for Download", key="btn_build_export_auth"):
@@ -700,4 +615,96 @@ with tabs[8]:
     st.write("**Apparatus Top 10:**")
     st.dataframe(data['Apparatus'].head(10), use_container_width=True)
     st.write("**Users Top 10:**")
+
+CLEAR_KEYS = [
+  "btn_approve_queue_auth",
+  "btn_backtodraft_queue_auth",
+  "btn_build_export_auth",
+  "btn_overwrite_source_auth",
+  "btn_reject_queue_auth",
+  "btn_rejected_to_draft",
+  "btn_save_incident_apparatus",
+  "btn_save_incident_personnel",
+  "download_export_auth",
+  "editor_apparatus_auth",
+  "editor_incident_apparatus",
+  "editor_incident_personnel",
+  "editor_personnel_auth",
+  "editor_users_auth",
+  "grid_approved_apparatus",
+  "grid_approved_auth",
+  "grid_approved_personnel",
+  "grid_pending_auth",
+  "grid_print_apparatus",
+  "grid_print_auth",
+  "grid_print_personnel",
+  "grid_rejected_auth",
+  "mode_write_auth",
+  "narrative_readonly_approved",
+  "narrative_readonly_print",
+  "narrative_readonly_review",
+  "pick_approved_auth",
+  "pick_rejected_auth",
+  "pick_review_queue_auth",
+  "print_pick_auth",
+  "print_status_auth",
+  "rejected_comments_readonly",
+  "rejected_narrative_readonly",
+  "rev_comments_queue_auth",
+  "save_apparatus_auth",
+  "save_personnel_auth",
+  "save_users_auth",
+  "w_add_people_btn_auth",
+  "w_add_units_btn_auth",
+  "w_addr_auth",
+  "w_alarm_auth",
+  "w_alarm_time_auth",
+  "w_arrival_time_auth",
+  "w_city_auth",
+  "w_clear_time_auth",
+  "w_enroute_time_auth",
+  "w_hours_default_auth",
+  "w_inc_date_auth",
+  "w_inc_num_auth",
+  "w_inc_time_auth",
+  "w_locname_auth",
+  "w_narrative_auth",
+  "w_pick_people_auth",
+  "w_pick_units_auth",
+  "w_postal_auth",
+  "w_prio_auth",
+  "w_resp_in_default_auth",
+  "w_role_default_auth",
+  "w_save_draft_btn",
+  "w_save_times_auth",
+  "w_shift_auth",
+  "w_state_auth",
+  "w_submit_review_btn",
+  "w_type_auth",
+  "w_unit_actions_auth",
+  "w_unit_role_auth",
+  "w_unit_type_auth"
+]
+CLEAR_BUFS = [
+  "current_incident_id",
+  "draft_rec",
+  "wr_apparatus_df",
+  "wr_draft_incident_id",
+  "wr_personnel_df"
+]
+
+# --- CLEAR REPORT (Write tab only) ---
+cA, cB = st.columns(2)
+with cA:
+    pass  # keep your existing Submit/Save buttons above or here
+with cB:
+    if st.button("🧹 Clear report (start new)", key="btn_clear_report"):
+        for _k in CLEAR_KEYS:
+            st.session_state.pop(_k, None)
+        for _k in CLEAR_BUFS:
+            st.session_state.pop(_k, None)
+        st.toast("Report form cleared. Ready for a new report.", icon="🧼")
+        st.rerun()
+
+
     st.dataframe(data['Users'].head(10), use_container_width=True)
