@@ -118,14 +118,38 @@ def build_person_options(df: pd.DataFrame) -> list:
     vals = s.dropna().map(lambda x: x.strip()).replace("", pd.NA).dropna().unique().tolist()
     return sorted(set(vals))
 
+
 def build_unit_options(df: pd.DataFrame) -> list:
-    for col in ["UnitNumber","CallSign","Name"]:
-        if col in df.columns and df[col].notna().any():
-            s = df[col].astype(str); break
-    else:
-        s = pd.Series([], dtype=str)
-    vals = s.dropna().map(lambda x: x.strip()).replace("", pd.NA).dropna().unique().tolist()
-    return sorted(set(vals))
+    # Build human-friendly labels that include UnitNumber, CallSign, and Name when available
+    labels = []
+    if df is None or df.empty:
+        return labels
+    # Normalize expected columns
+    cols = {c.lower(): c for c in df.columns}
+    def get(col):
+        return df[cols[col]] if col in cols else pd.Series([None]*len(df))
+    unit_number = get("unitnumber").astype(str) if "unitnumber" in cols else pd.Series([None]*len(df))
+    call_sign   = get("callsign").astype(str) if "callsign" in cols else pd.Series([None]*len(df))
+    name        = get("name").astype(str) if "name" in cols else pd.Series([None]*len(df))
+
+    for un, cs, nm in zip(unit_number.fillna(""), call_sign.fillna(""), name.fillna("")):
+        parts = []
+        if un and un.strip() and un.strip().lower() != "nan":
+            parts.append(un.strip())
+        if cs and cs.strip() and cs.strip().lower() != "nan":
+            parts.append(cs.strip())
+        if nm and nm.strip() and nm.strip().lower() != "nan":
+            parts.append(nm.strip())
+        label = " - ".join(parts)
+        if label:
+            labels.append(label)
+    # Fallback: if still empty, try any of the columns that had values
+    if not labels:
+        for col in ["UnitNumber","CallSign","Name"]:
+            if col in df.columns and df[col].notna().any():
+                labels = df[col].astype(str).dropna().map(lambda x: x.strip()).replace("", pd.NA).dropna().unique().tolist()
+                break
+    return sorted(set(labels))
 
 def repair_rosters(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     p = ensure_columns(data.get("Personnel", pd.DataFrame()), PERSONNEL_SCHEMA).copy()
