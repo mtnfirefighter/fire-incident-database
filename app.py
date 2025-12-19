@@ -290,6 +290,13 @@ with tabs[0]:
 
     with st.container(border=True):
         st.subheader("Incident Details")
+    # Caller Information
+    col_call1, col_call2 = st.columns(2)
+    with col_call1:
+        caller_name = st.text_input("Caller Name")
+    with col_call2:
+        caller_phone = st.text_input("Caller Phone")
+
         c1, c2, c3 = st.columns(3)
         inc_num = c1.text_input("IncidentNumber", value=str(defaults.get(PRIMARY_KEY,"")) if defaults else "", key="w_inc_num_auth")
         inc_date = c2.date_input("IncidentDate", value=pd.to_datetime(defaults.get("IncidentDate")).date() if defaults.get("IncidentDate") is not None and str(defaults.get("IncidentDate")) != "NaT" else date.today(), key="w_inc_date_auth")
@@ -734,20 +741,3 @@ with tabs[8]:
     st.dataframe(data['Apparatus'].head(10), use_container_width=True)
     st.write("**Users Top 10:**")
     st.dataframe(data['Users'].head(10), use_container_width=True)
-
-# =====================
-# Write Report helpers
-# =====================
-def _clear_write_report_state():
-    keys = [
-        "wr_caller_name",
-        "wr_caller_phone",
-        "wr_narrative",
-        "wr_location",
-        "wr_date",
-        "wr_time",
-    ]
-    for k in keys:
-        if k in st.session_state:
-            st.session_state[k] = ""
-
