@@ -734,3 +734,20 @@ with tabs[8]:
     st.dataframe(data['Apparatus'].head(10), use_container_width=True)
     st.write("**Users Top 10:**")
     st.dataframe(data['Users'].head(10), use_container_width=True)
+
+# =====================
+# Write Report helpers
+# =====================
+def _clear_write_report_state():
+    keys = [
+        "wr_caller_name",
+        "wr_caller_phone",
+        "wr_narrative",
+        "wr_location",
+        "wr_date",
+        "wr_time",
+    ]
+    for k in keys:
+        if k in st.session_state:
+            st.session_state[k] = ""
+
