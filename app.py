@@ -5,16 +5,6 @@ from typing import Dict, List
 import pandas as pd
 import streamlit as st
 
-# =====================
-# Write Report: clear form helper
-# =====================
-def _clear_write_report_form_state():
-    """Clear Streamlit session_state keys used by the Write Report tab (safe)."""
-    keys_to_clear = ['btn_save_incident_apparatus', 'btn_save_incident_personnel', 'edit_incident_preselect', 'editor_incident_apparatus', 'editor_incident_personnel', 'force_edit_mode', 'mode_write_auth', 'w_add_people_btn_auth', 'w_add_units_btn_auth', 'w_addr_auth', 'w_alarm_auth', 'w_alarm_time_auth', 'w_arrival_time_auth', 'w_city_auth', 'w_clear_time_auth', 'w_enroute_time_auth', 'w_hours_default_auth', 'w_inc_date_auth', 'w_inc_num_auth', 'w_inc_time_auth', 'w_locname_auth', 'w_narrative_auth', 'w_pick_people_auth', 'w_pick_units_auth', 'w_postal_auth', 'w_prio_auth', 'w_resp_in_default_auth', 'w_role_default_auth', 'w_save_draft_btn', 'w_save_times_auth', 'w_shift_auth', 'w_state_auth', 'w_submit_review_btn', 'w_type_auth', 'w_unit_actions_auth', 'w_unit_role_auth', 'w_unit_type_auth']
-    for k in keys_to_clear:
-        if k in st.session_state:
-            st.session_state.pop(k, None)
-
 st.set_page_config(page_title="Fire Incident Reports", page_icon="📝", layout="wide")
 
 DEFAULT_FILE = os.path.join(os.path.dirname(__file__), "fire_incident_db.xlsx")
@@ -29,7 +19,7 @@ CHILD_TABLES = {
 PERSONNEL_SCHEMA = ["PersonnelID","Name","UnitNumber","Rank","Badge","Phone","Email","Address","City","State","PostalCode","Certifications","Active","FirstName","LastName","FullName"]
 APPARATUS_SCHEMA = ["ApparatusID","UnitNumber","CallSign","UnitType","GPM","TankSize","SeatingCapacity","Station","Active","Name"]
 USERS_SCHEMA = ["Username","Password","Role","FullName","Active",
-                "CanWrite","CanEditOwn","CanEditAll","CanReview","CanApprove","CanManageUsers","CanEditRosters","CanPrint"]
+                "CanWrite","CanEditOwn","CanEditAll","CanReview","CanApprove","CanManageUsers","CanEditRosters","CanPrint","CanDeleteArchive"]
 
 LOOKUP_SHEETS = {
     "List_IncidentType": "IncidentType",
@@ -42,9 +32,9 @@ LOOKUP_SHEETS = {
 }
 
 ROLE_PRESETS = {
-    "Admin":   {"CanWrite":True,"CanEditOwn":True,"CanEditAll":True,"CanReview":True,"CanApprove":True,"CanManageUsers":True,"CanEditRosters":True,"CanPrint":True},
-    "Reviewer":{"CanWrite":False,"CanEditOwn":False,"CanEditAll":False,"CanReview":True,"CanApprove":True,"CanManageUsers":False,"CanEditRosters":False,"CanPrint":True},
-    "Member":  {"CanWrite":True,"CanEditOwn":True,"CanEditAll":False,"CanReview":False,"CanApprove":False,"CanManageUsers":False,"CanEditRosters":False,"CanPrint":True},
+    "Admin":   {"CanWrite":True,"CanEditOwn":True,"CanEditAll":True,"CanReview":True,"CanApprove":True,"CanManageUsers":True,"CanEditRosters":True,"CanPrint":True,"CanDeleteArchive":True},
+    "Reviewer":{"CanWrite":False,"CanEditOwn":False,"CanEditAll":False,"CanReview":True,"CanApprove":True,"CanManageUsers":False,"CanEditRosters":False,"CanPrint":True,"CanDeleteArchive":False},
+    "Member":  {"CanWrite":True,"CanEditOwn":True,"CanEditAll":False,"CanReview":False,"CanApprove":False,"CanManageUsers":False,"CanEditRosters":False,"CanPrint":True,"CanDeleteArchive":False},
 }
 
 def load_workbook(path: str) -> Dict[str, pd.DataFrame]:
@@ -226,7 +216,8 @@ else:
 ensure_table(data, "Incidents", [
     PRIMARY_KEY,"IncidentDate","IncidentTime","IncidentType","ResponsePriority","AlarmLevel","Shift",
     "LocationName","Address","City","State","PostalCode","Latitude","Longitude",
-    "Narrative","Status","CreatedBy","SubmittedAt","ReviewedBy","ReviewedAt","ReviewerComments"
+    "Narrative","Status","CreatedBy","SubmittedAt","ReviewedBy","ReviewedAt","ReviewerComments",
+    "CallerName","CallerPhone","ArchiveStatus"
 ])
 ensure_table(data, "Personnel", PERSONNEL_SCHEMA)
 ensure_table(data, "Apparatus", APPARATUS_SCHEMA)
@@ -268,18 +259,10 @@ user = st.session_state["user"]
 st.sidebar.write(f"**Logged in as:** {user.get('FullName', user.get('Username',''))}  \\nRole: {user.get('Role','')}")
 sign_out_button()
 
-tabs = st.tabs(["Write Report","Review Queue","Rejected","Approved","Rosters","Print","Export","Admin","Diagnostics"])
+tabs = st.tabs(["Write Report","Review Queue","Rejected","Approved","Archive","Rosters","Print","Export","Admin","Diagnostics"])
 
 with tabs[0]:
     st.header("Write Report")
-
-# Start a fresh report (clears all Write Report fields)
-col_new1, col_new2 = st.columns([1,5])
-with col_new1:
-    if st.button("New Report (Clear)", type="secondary", key="w_btn_clear_form"):
-        _clear_write_report_form_state()
-        st.rerun()
-
     master = data["Incidents"].copy()
     preselect = st.session_state.get("edit_incident_preselect")
     force_edit = st.session_state.get("force_edit_mode", False)
@@ -316,6 +299,14 @@ with col_new1:
         inc_type = c4.selectbox("IncidentType", options=[""]+lookups.get("IncidentType", []), index=([""]+lookups.get("IncidentType", [])).index(str(defaults.get("IncidentType",""))) if defaults.get("IncidentType") in lookups.get("IncidentType", []) else 0, key="w_type_auth")
         inc_prio = c5.selectbox("ResponsePriority", options=[""]+lookups.get("ResponsePriority", []), index=([""]+lookups.get("ResponsePriority", [])).index(str(defaults.get("ResponsePriority",""))) if defaults.get("ResponsePriority") in lookups.get("ResponsePriority", []) else 0, key="w_prio_auth")
         inc_alarm = c6.selectbox("AlarmLevel", options=[""]+lookups.get("AlarmLevel", []), index=([""]+lookups.get("AlarmLevel", [])).index(str(defaults.get("AlarmLevel",""))) if defaults.get("AlarmLevel") in lookups.get("AlarmLevel", []) else 0, key="w_alarm_auth")
+
+    # Caller Information (compact)
+    col_call1, col_call2 = st.columns(2)
+    with col_call1:
+        caller_name = st.text_input("Caller", key="caller_name")
+    with col_call2:
+        caller_phone = st.text_input("Caller Phone", key="caller_phone")
+
         c7, c8, c9 = st.columns(3)
         loc_name = c7.text_input("LocationName", value=str(defaults.get("LocationName","")) if defaults else "", key="w_locname_auth")
         addr = c8.text_input("Address", value=str(defaults.get("Address","")) if defaults else "", key="w_addr_auth")
@@ -462,6 +453,8 @@ with col_new1:
         "State": state,
         "PostalCode": postal,
         "Shift": shift,
+        "CallerName": caller_name,
+        "CallerPhone": caller_phone,
         "Narrative": narrative,
         "CreatedBy": user.get("Username",""),
     }
@@ -563,6 +556,19 @@ with tabs[3]:
         st.write(f"**Location:** {rec.get('LocationName','')} — {rec.get('Address','')} {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}")
         st.write(f"**Shift:** {rec.get('Shift','')}  |  **Reviewed By:** {rec.get('ReviewedBy','')} at {rec.get('ReviewedAt','')}")
         st.write("**Narrative:**")
+        
+        # Archive controls
+        inc_df = data["Incidents"]
+        cur_arch = str(rec.get("ArchiveStatus","ACTIVE") or "ACTIVE")
+        if cur_arch != "ARCHIVED":
+            if bool(user.get("CanApprove", False)) or bool(user.get("CanReview", False)) or bool(user.get("CanManageUsers", False)):
+                if st.button("Move to Archive", key="btn_move_to_archive"):
+                    data["Incidents"].loc[data["Incidents"][PRIMARY_KEY].astype(str) == str(sela), "ArchiveStatus"] = "ARCHIVED"
+                    save_to_path(data, file_path)
+                    st.rerun()
+                    st.success("Moved to archive.")
+        else:
+            st.success("This report is archived.")
         st.text_area("Narrative (read-only)", value=str(rec.get("Narrative","")), height=260, key="narrative_readonly_approved", disabled=True)
 
         ip = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
@@ -582,7 +588,77 @@ with tabs[3]:
         else:
             st.write("_None recorded._")
 
+
 with tabs[4]:
+    st.header("Archive")
+    inc = data["Incidents"].copy()
+    if "ArchiveStatus" not in inc.columns:
+        inc["ArchiveStatus"] = pd.NA
+    inc["ArchiveStatus"] = inc["ArchiveStatus"].fillna("ACTIVE").astype(str)
+    archived = inc[inc["ArchiveStatus"] == "ARCHIVED"]
+    st.dataframe(archived, use_container_width=True, hide_index=True, key="grid_archive")
+
+    sel_arch = None
+    if not archived.empty:
+        sel_arch = st.selectbox(
+            "Pick an Archived Incident",
+            options=archived[PRIMARY_KEY].astype(str).tolist(),
+            index=None,
+            placeholder="Choose...",
+            key="pick_archive"
+        )
+
+    if sel_arch:
+        rec = inc[inc[PRIMARY_KEY].astype(str) == str(sel_arch)].iloc[0].to_dict()
+        st.subheader(f"Incident {sel_arch}")
+        st.write(f"**Status:** {rec.get('Status','')}  |  **Archived:** {rec.get('ArchiveStatus','')}")
+        st.write(f"**Date/Time:** {rec.get('IncidentDate','')} {rec.get('IncidentTime','')}")
+        st.write(f"**Type:** {rec.get('IncidentType','')}  |  **Priority:** {rec.get('ResponsePriority','')}  |  **Alarm:** {rec.get('AlarmLevel','')}")
+        st.write(f"**Caller:** {rec.get('CallerName','')} ({rec.get('CallerPhone','')})")
+        st.write(f"**Location:** {rec.get('LocationName','')} — {rec.get('Address','')}, {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}")
+        st.write("**Narrative:**")
+        st.text_area("Narrative (read-only)", value=str(rec.get("Narrative","")), height=260, key="narrative_archive", disabled=True)
+
+        ip = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
+        ia = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
+        ip_view = ip[ip[PRIMARY_KEY].astype(str) == str(sel_arch)]
+        ia_view = ia[ia[PRIMARY_KEY].astype(str) == str(sel_arch)]
+
+        st.markdown(f"**Personnel on Scene ({len(ip_view)}):**")
+        if not ip_view.empty:
+            cols = [c for c in ["PersonnelID","Name","Role","Hours","RespondedIn"] if c in ip_view.columns]
+            st.dataframe(ip_view[cols], use_container_width=True, hide_index=True, key="grid_archive_personnel")
+        else:
+            st.write("_None recorded._")
+
+        st.markdown(f"**Apparatus on Scene ({len(ia_view)}):**")
+        if not ia_view.empty:
+            cols = [c for c in ["ApparatusID","Unit","UnitType","Role","Actions"] if c in ia_view.columns]
+            st.dataframe(ia_view[cols], use_container_width=True, hide_index=True, key="grid_archive_apparatus")
+        else:
+            st.write("_None recorded._")
+
+        # Admin-only delete from archive
+        can_delete = bool(user.get("CanDeleteArchive", False))
+        if can_delete:
+            st.divider()
+            st.warning("Delete permanently removes this report and its related personnel/apparatus rows.")
+            confirm = st.checkbox("I understand this cannot be undone.", key="confirm_delete_archive")
+            if st.button("Delete from Archive (Permanent)", type="primary", disabled=not confirm, key="btn_delete_archive"):
+                # Delete from Incidents
+                data["Incidents"] = data["Incidents"][data["Incidents"][PRIMARY_KEY].astype(str) != str(sel_arch)].copy()
+                # Delete related child rows
+                for t in ["Incident_Personnel","Incident_Apparatus","Incident_Times","Incident_Actions"]:
+                    if t in data and PRIMARY_KEY in data[t].columns:
+                        data[t] = data[t][data[t][PRIMARY_KEY].astype(str) != str(sel_arch)].copy()
+                save_to_path(data, file_path)
+                st.rerun()
+                st.success("Deleted from archive.")
+        else:
+            st.info("Only Admin users with Delete permission can permanently delete archived reports.")
+
+
+with tabs[5]:
     st.header("Rosters")
     st.caption("Edit, then click Save. Rank is free text (letters allowed).")
     # Roster editing still permission-gated in earlier build; keep simple here:
@@ -602,7 +678,7 @@ with tabs[4]:
         ok, err = save_to_path(data, file_path)
         st.success("Saved.") if ok else st.error(err)
 
-with tabs[5]:
+with tabs[6]:
     st.header("Print")
     status = st.selectbox("Filter by Status", options=["","Approved","Submitted","Draft","Rejected"], key="print_status_auth")
     base = data["Incidents"].copy()
@@ -714,7 +790,7 @@ with tabs[5]:
                 st.error(f"PDF failed: {e}")
 
 
-with tabs[6]:
+with tabs[7]:
     st.header("Export")
     if st.button("Build Excel for Download", key="btn_build_export_auth"):
         payload = save_workbook_to_bytes(data)
@@ -724,7 +800,7 @@ with tabs[6]:
         if ok: st.success(f"Wrote: {file_path}")
         else: st.error(f"Failed: {err}")
 
-with tabs[7]:
+with tabs[8]:
     st.header("Admin — User Management & Permissions")
     users_df = apply_role_presets(ensure_columns(data.get("Users", pd.DataFrame()), USERS_SCHEMA))
     users_edit = st.data_editor(users_df, num_rows="dynamic", use_container_width=True, key="editor_users_auth")
@@ -738,7 +814,7 @@ with tabs[7]:
         else:
             st.error(err)
 
-with tabs[8]:
+with tabs[9]:
     st.header("Diagnostics")
     st.write(f"**App dir:** {os.path.dirname(__file__)}")
     st.write(f"**Excel path:** {file_path}  |  Exists: {'✅' if os.path.exists(file_path) else '❌'}")
