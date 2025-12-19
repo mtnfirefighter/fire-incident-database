@@ -528,6 +528,32 @@ with tabs[3]:
         if not ia_view.empty:
             show_cols = [c for c in ["Unit","UnitType","Role","Actions"] if c in ia_view.columns]
             st.dataframe(ia_view[show_cols], use_container_width=True, hide_index=True, key="grid_approved_apparatus")
+        # --- HTML DOWNLOAD / PRINT ---
+        html = f"""
+        <html>
+        <head><title>Incident {sel}</title></head>
+        <body>
+        <h1>Incident {sel}</h1>
+        <p><b>Type:</b> {rec.get('IncidentType','')}<br>
+        <b>Priority:</b> {rec.get('ResponsePriority','')}<br>
+        <b>Alarm:</b> {rec.get('AlarmLevel','')}</p>
+        <p><b>Location:</b> {rec.get('Address','')} {rec.get('City','')} {rec.get('State','')} {rec.get('PostalCode','')}</p>
+        <h2>Narrative</h2>
+        <p>{rec.get('Narrative','')}</p>
+        <h2>Personnel</h2>
+        {ip_view[show_person_cols].to_html(index=False) if not ip_view.empty else '<p>None</p>'}
+        <h2>Apparatus</h2>
+        {ia_view[show_cols].to_html(index=False) if not ia_view.empty else '<p>None</p>'}
+        </body></html>
+        """
+        st.download_button(
+            "⬇️ Download / Print Report (HTML)",
+            data=html,
+            file_name=f"Incident_{sel}.html",
+            mime="text/html",
+            key="download_html_print"
+        )
+
         else:
             st.write("_None recorded._")
 
