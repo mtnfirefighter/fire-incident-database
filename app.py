@@ -263,6 +263,21 @@ tabs = st.tabs(["Write Report","Review Queue","Rejected","Approved","Archive","R
 
 with tabs[0]:
     st.header("Write Report")
+    # --- Clear / New Report ---
+    if st.button("🆕 New Report (Clear)", key="btn_clear_write"):
+        keys_to_clear = [
+            k for k in list(st.session_state.keys())
+            if k.startswith("w_")
+            or k.startswith("editor_incident_")
+            or k.startswith("pick_")
+        ]
+        for k in keys_to_clear:
+            st.session_state.pop(k, None)
+
+        st.session_state.pop("edit_incident_preselect", None)
+        st.session_state.pop("force_edit_mode", None)
+        st.experimental_rerun()
+
     master = data["Incidents"].copy()
     preselect = st.session_state.get("edit_incident_preselect")
     force_edit = st.session_state.get("force_edit_mode", False)
