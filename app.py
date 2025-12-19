@@ -290,13 +290,6 @@ with tabs[0]:
 
     with st.container(border=True):
         st.subheader("Incident Details")
-    # Caller Information
-    col_call1, col_call2 = st.columns(2)
-    with col_call1:
-        caller_name = st.text_input("Caller Name")
-    with col_call2:
-        caller_phone = st.text_input("Caller Phone")
-
         c1, c2, c3 = st.columns(3)
         inc_num = c1.text_input("IncidentNumber", value=str(defaults.get(PRIMARY_KEY,"")) if defaults else "", key="w_inc_num_auth")
         inc_date = c2.date_input("IncidentDate", value=pd.to_datetime(defaults.get("IncidentDate")).date() if defaults.get("IncidentDate") is not None and str(defaults.get("IncidentDate")) != "NaT" else date.today(), key="w_inc_date_auth")
@@ -305,6 +298,14 @@ with tabs[0]:
         inc_type = c4.selectbox("IncidentType", options=[""]+lookups.get("IncidentType", []), index=([""]+lookups.get("IncidentType", [])).index(str(defaults.get("IncidentType",""))) if defaults.get("IncidentType") in lookups.get("IncidentType", []) else 0, key="w_type_auth")
         inc_prio = c5.selectbox("ResponsePriority", options=[""]+lookups.get("ResponsePriority", []), index=([""]+lookups.get("ResponsePriority", [])).index(str(defaults.get("ResponsePriority",""))) if defaults.get("ResponsePriority") in lookups.get("ResponsePriority", []) else 0, key="w_prio_auth")
         inc_alarm = c6.selectbox("AlarmLevel", options=[""]+lookups.get("AlarmLevel", []), index=([""]+lookups.get("AlarmLevel", [])).index(str(defaults.get("AlarmLevel",""))) if defaults.get("AlarmLevel") in lookups.get("AlarmLevel", []) else 0, key="w_alarm_auth")
+
+    # Caller Information (compact)
+    col_call1, col_call2 = st.columns(2)
+    with col_call1:
+        caller_name = st.text_input("Caller", key="caller_name")
+    with col_call2:
+        caller_phone = st.text_input("Caller Phone", key="caller_phone")
+
         c7, c8, c9 = st.columns(3)
         loc_name = c7.text_input("LocationName", value=str(defaults.get("LocationName","")) if defaults else "", key="w_locname_auth")
         addr = c8.text_input("Address", value=str(defaults.get("Address","")) if defaults else "", key="w_addr_auth")
