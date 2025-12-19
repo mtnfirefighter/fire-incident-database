@@ -12,8 +12,8 @@ PRIMARY_KEY = "IncidentNumber"
 
 CHILD_TABLES = {
     "Incident_Times": ["IncidentNumber","Alarm","Enroute","Arrival","Clear"],
-    "Incident_Personnel": ["IncidentNumber","Name","Role","Hours","RespondedIn"],
-    "Incident_Apparatus": ["IncidentNumber","Unit","UnitType","Role","Actions"],
+    "Incident_Personnel": ["IncidentNumber","PersonnelID","Name","Role","Hours","RespondedIn"],
+    "Incident_Apparatus": ["IncidentNumber","ApparatusID","Unit","UnitType","Role","Actions"],
     "Incident_Actions": ["IncidentNumber","Action","Notes"],
 }
 PERSONNEL_SCHEMA = ["PersonnelID","Name","UnitNumber","Rank","Badge","Phone","Email","Address","City","State","PostalCode","Certifications","Active","FirstName","LastName","FullName"]
@@ -69,6 +69,29 @@ def ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
         if c not in df.columns:
             df[c] = pd.NA
     return df
+
+# --- ID lookup helpers (used when adding roster selections to an incident) ---
+def _lookup_personnel_id(personnel_df: pd.DataFrame, name: str):
+    if personnel_df is None or personnel_df.empty:
+        return pd.NA
+    if "Name" in personnel_df.columns:
+        m = personnel_df[personnel_df["Name"].astype(str) == str(name)]
+        if not m.empty and "PersonnelID" in m.columns:
+            return m.iloc[0]["PersonnelID"]
+    # fallback: try FirstName/LastName and Rank combined if needed
+    return pd.NA
+
+def _lookup_apparatus_id(app_df: pd.DataFrame, unit_value: str):
+    if app_df is None or app_df.empty:
+        return pd.NA
+    u = str(unit_value)
+    # try matching by Name, CallSign, UnitNumber (in that order)
+    for col in ["Name", "CallSign", "UnitNumber", "Unit"]:
+        if col in app_df.columns:
+            m = app_df[app_df[col].astype(str) == u]
+            if not m.empty and "ApparatusID" in m.columns:
+                return m.iloc[0]["ApparatusID"]
+    return pd.NA
 
 def ensure_table(data: Dict[str, pd.DataFrame], name: str, cols: List[str]):
     data[name] = ensure_columns(data.get(name, pd.DataFrame()), cols)
@@ -308,13 +331,18 @@ with tabs[0]:
             else:
                 inc_key = str(inc_num).strip()
                 df = ensure_columns(data.get("Incident_Personnel", pd.DataFrame()), CHILD_TABLES["Incident_Personnel"])
-                new = [{
-                    PRIMARY_KEY: inc_key,
-                    "Name": n,
-                    "Role": role_default,
-                    "Hours": hours_default,
-                    "RespondedIn": (responded_in_default or None)
-                } for n in picked_people]
+                new = []
+                people_df = data.get('Personnel', pd.DataFrame())
+                for n in picked_people:
+                    pid = _lookup_personnel_id(people_df, n)
+                    new.append({
+                        PRIMARY_KEY: inc_key,
+                        'PersonnelID': pid,
+                        'Name': n,
+                        'Role': role_default,
+                        'Hours': hours_default,
+                        'RespondedIn': (responded_in_default or None),
+                    })
                 if new:
                     data["Incident_Personnel"] = pd.concat([df, pd.DataFrame(new)], ignore_index=True)
                     if st.session_state.get("autosave", True): save_to_path(data, file_path)
@@ -352,13 +380,18 @@ with tabs[0]:
             else:
                 inc_key = str(inc_num).strip()
                 df = ensure_columns(data.get("Incident_Apparatus", pd.DataFrame()), CHILD_TABLES["Incident_Apparatus"])
-                new = [{
-                    PRIMARY_KEY: inc_key,
-                    "Unit": u,
-                    "UnitType": (unit_type if unit_type else None),
-                    "Role": unit_role,
-                    "Actions": unit_actions or ""
-                } for u in picked_units]
+                new = []
+                app_df = data.get('Apparatus', pd.DataFrame())
+                for u in picked_units:
+                    aid = _lookup_apparatus_id(app_df, u)
+                    new.append({
+                        PRIMARY_KEY: inc_key,
+                        'ApparatusID': aid,
+                        'Unit': u,
+                        'UnitType': (unit_type if unit_type else None),
+                        'Role': unit_role,
+                        'Actions': unit_actions or '',
+                    })
                 if new:
                     data["Incident_Apparatus"] = pd.concat([df, pd.DataFrame(new)], ignore_index=True)
                     if st.session_state.get("autosave", True): save_to_path(data, file_path)
