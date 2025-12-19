@@ -452,6 +452,8 @@ with tabs[0]:
         "State": state,
         "PostalCode": postal,
         "Shift": shift,
+        "CallerName": caller_name,
+        "CallerPhone": caller_phone,
         "Narrative": narrative,
         "CreatedBy": user.get("Username",""),
     }
